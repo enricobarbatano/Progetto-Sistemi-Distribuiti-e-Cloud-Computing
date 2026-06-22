@@ -1,0 +1,63 @@
+# Go build output
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Coverage
+coverage.out
+coverage.html
+
+# Generated protobuf files - scegli tu se ignorarli o versionarli
+# Se vuoi committare i file generati, lascia commentate queste righe.
+# gen/
+# *.pb.go
+
+# Environment variables / secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# AWS credentials or local cloud config
+.aws/
+credentials
+config
+
+# Docker local data
+docker-data/
+volumes/
+
+# Logs
+*.log
+logs/
+
+# Snapshots and backups generated at runtime
+snapshots/
+backups/
+*.snapshot
+*.checkpoint
+
+# VS Code local settings
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Windows / macOS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# OneDrive temporary files
+~$*
+*.tmp
