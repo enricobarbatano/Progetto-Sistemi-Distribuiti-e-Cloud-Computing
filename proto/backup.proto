@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package backup;
+
+option go_package = "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/backuppb;backuppb";
+
+service BackupService {
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  rpc DownloadSnapshot(DownloadSnapshotRequest) returns (DownloadSnapshotResponse);
+  rpc CompactLog(CompactLogRequest) returns (CompactLogResponse);
+  rpc GetBackupStatus(GetBackupStatusRequest) returns (GetBackupStatusResponse);
+}
+
+message CreateSnapshotRequest {
+  string requester_id = 1;
+}
+
+message CreateSnapshotResponse {
+  bool success = 1;
+  string snapshot_id = 2;
+  uint64 last_included_index = 3;
+  uint64 last_included_term = 4;
+  string error = 5;
+}
+
+message DownloadSnapshotRequest {
+  string snapshot_id = 1;
+}
+
+message DownloadSnapshotResponse {
+  bool success = 1;
+  string snapshot_id = 2;
+  bytes snapshot_data = 3;
+  string error = 4;
+}
+
+message CompactLogRequest {
+  string snapshot_id = 1;
+  uint64 up_to_index = 2;
+}
+
+message CompactLogResponse {
+  bool success = 1;
+  uint64 compacted_entries = 2;
+  string error = 3;
+}
+
+message GetBackupStatusRequest {
+}
+
+message GetBackupStatusResponse {
+  string service_id = 1;
+  uint64 created_snapshots = 2;
+  string last_snapshot_id = 3;
+  string status = 4;
+}
