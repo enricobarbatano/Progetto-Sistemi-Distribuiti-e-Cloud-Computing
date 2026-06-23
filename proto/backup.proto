@@ -4,50 +4,66 @@ package backup;
 
 option go_package = "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/backuppb;backuppb";
 
+// BackupService espone le operazioni usate dal servizio di snapshot e backup.
 service BackupService {
-  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  // Avvia la creazione di uno snapshot.
+  rpc TriggerSnapshot(TriggerSnapshotRequest) returns (TriggerSnapshotResponse);
+
+  // Permette di scaricare uno snapshot già creato.
   rpc DownloadSnapshot(DownloadSnapshotRequest) returns (DownloadSnapshotResponse);
+
+  // Richiede la compattazione dei log fino a un certo indice.
   rpc CompactLog(CompactLogRequest) returns (CompactLogResponse);
+
+  // Restituisce informazioni sullo stato del servizio di backup.
   rpc GetBackupStatus(GetBackupStatusRequest) returns (GetBackupStatusResponse);
 }
 
-message CreateSnapshotRequest {
+// Richiesta per avviare uno snapshot.
+message TriggerSnapshotRequest {
   string requester_id = 1;
 }
 
-message CreateSnapshotResponse {
-  bool success = 1;
+// Risposta alla richiesta di snapshot.
+message TriggerSnapshotResponse {
+  bool accepted = 1;
   string snapshot_id = 2;
-  uint64 last_included_index = 3;
-  uint64 last_included_term = 4;
-  string error = 5;
+  string error = 3;
 }
 
+// Richiesta per scaricare uno snapshot.
 message DownloadSnapshotRequest {
   string snapshot_id = 1;
 }
 
+// Risposta con i dati dello snapshot.
 message DownloadSnapshotResponse {
   bool success = 1;
   string snapshot_id = 2;
   bytes snapshot_data = 3;
-  string error = 4;
+  uint64 last_included_index = 4;
+  uint64 last_included_term = 5;
+  string error = 6;
 }
 
+// Richiesta per compattare il log.
 message CompactLogRequest {
   string snapshot_id = 1;
   uint64 up_to_index = 2;
 }
 
+// Risposta alla compattazione del log.
 message CompactLogResponse {
   bool success = 1;
   uint64 compacted_entries = 2;
   string error = 3;
 }
 
+// Richiesta stato backup.
 message GetBackupStatusRequest {
 }
 
+// Risposta stato backup.
 message GetBackupStatusResponse {
   string service_id = 1;
   uint64 created_snapshots = 2;

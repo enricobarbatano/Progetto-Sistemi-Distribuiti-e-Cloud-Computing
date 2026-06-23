@@ -4,42 +4,82 @@ package kv;
 
 option go_package = "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/kvpb;kvpb";
 
+// KeyValueService espone le operazioni sullo storage chiave-valore.
+// Il Client Proxy userà queste RPC per parlare con il cluster di consenso.
+
 service KeyValueService {
-  rpc Get(GetRequest) returns (GetResponse);
+  // Memorizza o aggiorna una coppia chiave-valore.
   rpc Put(PutRequest) returns (PutResponse);
+
+  // Recupera il valore associato a una chiave.
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // Elimina una chiave dallo storage.
   rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // Permette al Proxy di scoprire dinamicamente il leader corrente.
+  rpc GetLeader(GetLeaderRequest) returns (GetLeaderResponse);
 }
 
+// Richiesta Put.
+message PutRequest {
+  string key = 1;
+  string value = 2;
+
+  // Identificativo opzionale della richiesta.
+  // Utile per deduplicazione o logging.
+  string request_id = 3;
+}
+
+// Risposta Put.
+message PutResponse {
+  bool success = 1;
+  string error = 2;
+
+  // Se il nodo contattato non è leader, può suggerire il leader noto.
+  string leader_hint = 3;
+}
+
+// Richiesta Get.
 message GetRequest {
   string key = 1;
 }
 
+// Risposta Get.
 message GetResponse {
   bool found = 1;
   string value = 2;
   string error = 3;
+
+  // Se il nodo contattato non è leader, può suggerire il leader noto.
   string leader_hint = 4;
 }
 
-message PutRequest {
-  string key = 1;
-  string value = 2;
-  string request_id = 3;
-}
-
-message PutResponse {
-  bool success = 1;
-  string error = 2;
-  string leader_hint = 3;
-}
-
+// Richiesta Delete.
 message DeleteRequest {
   string key = 1;
+
+  // Identificativo opzionale della richiesta.
   string request_id = 2;
 }
 
+// Risposta Delete.
 message DeleteResponse {
   bool success = 1;
   string error = 2;
+
+  // Se il nodo contattato non è leader, può suggerire il leader noto.
   string leader_hint = 3;
+}
+
+// Richiesta per conoscere il leader corrente.
+message GetLeaderRequest {
+}
+
+// Risposta con informazioni sul leader.
+message GetLeaderResponse {
+  bool has_leader = 1;
+  string leader_id = 2;
+  string leader_address = 3;
+  uint64 term = 4;
 }

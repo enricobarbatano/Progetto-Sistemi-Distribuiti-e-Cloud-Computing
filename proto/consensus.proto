@@ -4,14 +4,20 @@ package consensus;
 
 option go_package = "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/consensuspb;consensuspb";
 
+// ConsensusService contiene le RPC interne usate dai nodi di consenso.
+// In questo progetto rappresenta una versione semplificata del protocollo Raft.
 service ConsensusService {
+  // Usata da un nodo Candidate per richiedere voti agli altri nodi.
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+
+  // Usata dal Leader per replicare log entries e inviare heartbeat.
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
-  rpc GetLeader(GetLeaderRequest) returns (GetLeaderResponse);
-  rpc GetNodeState(GetNodeStateRequest) returns (GetNodeStateResponse);
+
+  // Usata dal Leader per inviare snapshot a follower troppo arretrati.
   rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
 }
 
+// Ruolo corrente di un nodo nel cluster Raft.
 enum NodeRole {
   NODE_ROLE_UNSPECIFIED = 0;
   NODE_ROLE_FOLLOWER = 1;
@@ -19,6 +25,7 @@ enum NodeRole {
   NODE_ROLE_LEADER = 3;
 }
 
+// Tipo di operazione memorizzata nel log replicato.
 enum LogOperation {
   LOG_OPERATION_UNSPECIFIED = 0;
   LOG_OPERATION_PUT = 1;
@@ -26,6 +33,7 @@ enum LogOperation {
   LOG_OPERATION_NOOP = 3;
 }
 
+// Singola entry del log replicato.
 message LogEntry {
   uint64 index = 1;
   uint64 term = 2;
@@ -34,69 +42,50 @@ message LogEntry {
   string value = 5;
 }
 
+// Richiesta di voto inviata da un Candidate.
 message RequestVoteRequest {
-  string candidate_id = 1;
-  uint64 term = 2;
+  uint64 term = 1;
+  string candidate_id = 2;
   uint64 last_log_index = 3;
   uint64 last_log_term = 4;
 }
 
+// Risposta alla richiesta di voto.
 message RequestVoteResponse {
-  string node_id = 1;
-  uint64 term = 2;
-  bool vote_granted = 3;
+  uint64 term = 1;
+  bool vote_granted = 2;
 }
 
+// Richiesta AppendEntries usata sia per heartbeat sia per replicazione log.
 message AppendEntriesRequest {
-  string leader_id = 1;
-  uint64 term = 2;
+  uint64 term = 1;
+  string leader_id = 2;
   uint64 prev_log_index = 3;
   uint64 prev_log_term = 4;
   repeated LogEntry entries = 5;
   uint64 leader_commit = 6;
 }
 
+// Risposta ad AppendEntries.
 message AppendEntriesResponse {
-  string node_id = 1;
-  uint64 term = 2;
-  bool success = 3;
-  uint64 match_index = 4;
+  uint64 term = 1;
+  bool success = 2;
+  uint64 match_index = 3;
 }
 
-message GetLeaderRequest {
-}
-
-message GetLeaderResponse {
-  bool has_leader = 1;
-  string leader_id = 2;
-  string leader_address = 3;
-  uint64 term = 4;
-}
-
-message GetNodeStateRequest {
-}
-
-message GetNodeStateResponse {
-  string node_id = 1;
-  NodeRole role = 2;
-  uint64 current_term = 3;
-  string voted_for = 4;
-  uint64 commit_index = 5;
-  uint64 last_applied = 6;
-  uint64 last_log_index = 7;
-  uint64 last_log_term = 8;
-}
-
+// Richiesta per installare uno snapshot su un follower.
 message InstallSnapshotRequest {
-  string leader_id = 1;
-  uint64 term = 2;
+  uint64 term = 1;
+  string leader_id = 2;
   uint64 last_included_index = 3;
   uint64 last_included_term = 4;
-  bytes snapshot_data = 5;
+  uint64 offset = 5;
+  bytes data = 6;
+  bool done = 7;
 }
 
+// Risposta all'installazione dello snapshot.
 message InstallSnapshotResponse {
-  string node_id = 1;
-  uint64 term = 2;
-  bool success = 3;
+  uint64 term = 1;
+  bool success = 2;
 }
