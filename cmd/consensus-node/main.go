@@ -61,6 +61,9 @@ func main() {
 		log.Fatalf("cannot create consensus node: %v", err)
 	}
 
+	node.Start()
+	defer node.Stop()
+
 	// Apertura della porta TCP su cui il server gRPC riceverà le richieste.
 	// Il formato ":"+port indica che il server ascolta su tutte le interfacce
 	// di rete disponibili, sulla porta specificata.
