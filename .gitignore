@@ -61,3 +61,5 @@ Desktop.ini
 # OneDrive temporary files
 ~$*
 *.tmp
+# Runtime node state
+data/
