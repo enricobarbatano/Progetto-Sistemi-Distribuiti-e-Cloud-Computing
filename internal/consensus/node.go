@@ -19,7 +19,8 @@
 //
 //   - riuso delle connessioni gRPC verso i peer;
 //   - gestione dello stato online/offline dei peer;
-//   - logging dei peer offline solo al cambio di stato.
+//   - logging dei peer offline solo al cambio di stato;
+//   - Write-Ahead Log append-only minimale per tracciare le modifiche persistenti.
 //
 // La logica di replicazione completa dei log non è ancora implementata.
 // Verrà aggiunta nelle fasi successive del progetto.
@@ -51,6 +52,23 @@ import (
 // se il nodo crasha e riparte, deve poter recuperare questi valori da storage
 // stabile prima di tornare a partecipare al cluster.
 type persistentState struct {
+	CurrentTerm uint64                  `json:"current_term"`
+	VotedFor    string                  `json:"voted_for"`
+	Log         []*consensuspb.LogEntry `json:"log"`
+}
+
+// walRecord rappresenta un record append-only del Write-Ahead Log.
+//
+// Ogni volta che lo stato persistente del nodo viene modificato, viene scritto
+// un nuovo record nel WAL prima di aggiornare il file state.json.
+//
+// In questa prima versione il record contiene uno snapshot dello stato
+// persistente corrente. Nelle fasi successive potrà essere raffinato per
+// distinguere eventi più specifici, come cambio termine, voto concesso o append
+// di una singola log entry.
+type walRecord struct {
+	Timestamp   string                  `json:"timestamp"`
+	NodeID      string                  `json:"node_id"`
 	CurrentTerm uint64                  `json:"current_term"`
 	VotedFor    string                  `json:"voted_for"`
 	Log         []*consensuspb.LogEntry `json:"log"`
@@ -106,8 +124,15 @@ type ConsensusNode struct {
 	// Le entry committed del log vengono applicate a questa mappa.
 	data map[string]string
 
-	// Percorso del file usato per salvare lo stato persistente del nodo.
+	// Percorso del file usato per salvare lo snapshot compatto dello stato
+	// persistente corrente.
 	stateFile string
+
+	// Percorso del file WAL append-only.
+	//
+	// Il WAL registra ogni modifica dello stato persistente prima che venga
+	// aggiornato lo snapshot compatto state.json.
+	walFile string
 
 	// Canale usato per notificare al loop di elezione che il timer va resettato.
 	// Viene usato quando arriva un heartbeat valido oppure quando il nodo
@@ -181,8 +206,11 @@ func NewConsensusNode(id string, address string, peers map[string]string, dataDi
 		// Macchina a stati key-value locale.
 		data: make(map[string]string),
 
-		// File JSON in cui viene salvato lo stato persistente del nodo.
+		// File JSON in cui viene salvato lo snapshot compatto dello stato persistente.
 		stateFile: filepath.Join(dataDir, fmt.Sprintf("%s_state.json", id)),
+
+		// File WAL append-only usato per tracciare le modifiche persistenti.
+		walFile: filepath.Join(dataDir, fmt.Sprintf("%s_wal.log", id)),
 
 		// Canale bufferizzato usato per resettare il timer di elezione.
 		electionResetCh: make(chan struct{}, 1),
@@ -300,15 +328,57 @@ func (n *ConsensusNode) markPeerOnlineLocked(peerID string) {
 	n.peerOnline[peerID] = true
 }
 
+// appendWALLocked aggiunge un record al Write-Ahead Log del nodo.
+//
+// Questa funzione deve essere chiamata con n.mu già acquisito.
+//
+// Il WAL è append-only: ogni modifica dello stato persistente viene aggiunta
+// in fondo al file senza sovrascrivere i record precedenti. In questo modo è
+// possibile mantenere una traccia storica degli aggiornamenti persistenti.
+//
+// In questa versione il WAL registra uno snapshot dello stato persistente
+// corrente. È una scelta semplice e compatibile con il recovery attuale basato
+// su state.json.
+func (n *ConsensusNode) appendWALLocked() error {
+	record := walRecord{
+		Timestamp:   time.Now().UTC().Format(time.RFC3339Nano),
+		NodeID:      n.id,
+		CurrentTerm: n.currentTerm,
+		VotedFor:    n.votedFor,
+		Log:         n.log,
+	}
+
+	file, err := os.OpenFile(n.walFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("cannot open wal file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	if err := encoder.Encode(record); err != nil {
+		return fmt.Errorf("cannot append wal record: %w", err)
+	}
+
+	return nil
+}
+
 // persistLocked salva su disco lo stato persistente del nodo.
 //
 // Il suffisso "Locked" indica che questa funzione deve essere chiamata solo
 // quando il mutex n.mu è già stato acquisito dal chiamante.
 //
-// Il salvataggio avviene scrivendo prima su un file temporaneo e poi sostituendo
-// il file definitivo tramite rename. Questo riduce il rischio di lasciare un
-// file di stato corrotto in caso di errore durante la scrittura.
+// La persistenza avviene in due passaggi:
+//
+//  1. viene scritto un record append-only nel WAL;
+//  2. viene aggiornato atomicamente lo snapshot compatto state.json.
+//
+// Questo segue il principio del Write-Ahead Logging: prima si registra su disco
+// il cambiamento, poi si aggiorna la rappresentazione compatta dello stato.
 func (n *ConsensusNode) persistLocked() error {
+	if err := n.appendWALLocked(); err != nil {
+		return err
+	}
+
 	state := persistentState{
 		CurrentTerm: n.currentTerm,
 		VotedFor:    n.votedFor,
