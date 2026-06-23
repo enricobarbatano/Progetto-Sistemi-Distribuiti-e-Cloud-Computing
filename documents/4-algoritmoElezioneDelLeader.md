@@ -1,20 +1,28 @@
 # 4 - Algoritmo di Elezione del Leader
 
-Questo documento descrive la realizzazione della **Fase 4** del progetto: l'implementazione dell'algoritmo di elezione del leader nel cluster di consenso.
+Questo documento descrive la realizzazione della **Fase 4** del progetto: l'implementazione dell'algoritmo di elezione del leader nel cluster di consenso, più gli interventi di hardening infrastrutturale effettuati prima di passare alla Fase 5.
 
-L'obiettivo della fase era trasformare i Consensus Node da semplici server gRPC stateful a nodi capaci di coordinarsi autonomamente per eleggere un leader, secondo una versione semplificata del protocollo Raft.
+L'obiettivo principale della fase era trasformare i Consensus Node da semplici server gRPC stateful a nodi capaci di coordinarsi autonomamente per eleggere un leader, secondo una versione semplificata del protocollo Raft.
+
+In più, prima di affrontare la replicazione atomica dei log, sono stati sistemati alcuni aspetti tecnici fondamentali:
+
+- riuso delle connessioni gRPC verso i peer;
+- gestione più pulita dei peer offline/online;
+- riduzione dei log rumorosi sugli heartbeat falliti;
+- introduzione di un WAL append-only minimale;
+- verifica dell'inizializzazione dello stato volatile del leader.
 
 ---
 
-## 1. Obiettivo della fase
+## 1. Obiettivo della Fase 4
 
-Prima di questa fase, ogni nodo era in grado di:
+Prima di questa fase, ogni nodo era già in grado di:
 
 - avviarsi come server gRPC;
 - mantenere stato persistente e volatile;
 - esporre le RPC definite nei file `.proto`;
 - rispondere a chiamate minime come `GetLeader` e `Get`;
-- salvare su disco `currentTerm`, `votedFor` e `log`.
+- salvare su disco `currentTerm`, `votedFor` e `log` tramite `state.json`.
 
 Tuttavia, mancava ancora la capacità del cluster di eleggere autonomamente un leader.
 
@@ -44,7 +52,7 @@ cmd/bench-client/main.go
 
 In particolare:
 
-- `internal/consensus/node.go` contiene la logica dell'elezione e degli heartbeat;
+- `internal/consensus/node.go` contiene la logica dell'elezione, degli heartbeat, delle connessioni persistenti, del tracking dei peer e della persistenza WAL;
 - `cmd/consensus-node/main.go` avvia il nodo e chiama `Start()` per far partire i loop interni;
 - `cmd/bench-client/main.go` viene usato come client gRPC minimale per verificare `GetLeader`.
 
@@ -85,7 +93,7 @@ Viene usato quando:
 
 Indica ogni quanto tempo un leader invia heartbeat ai follower.
 
-Durante i test locali su Windows è stato scelto un intervallo più largo rispetto ai valori classici, per evitare instabilità dovute a latenza locale, avvio manuale dei processi e uso di `go run`.
+Durante i test locali su Windows è stato scelto un intervallo più largo rispetto ai valori classici, perché l'avvio manuale dei processi e l'uso di `go run` possono introdurre latenza e jitter.
 
 ### `leaderID` e `leaderAddress`
 
@@ -107,7 +115,7 @@ Il suo compito è generare un timeout casuale per l'elezione.
 
 L'uso di timeout randomizzati serve a ridurre la probabilità che più nodi diventino `Candidate` nello stesso momento, causando uno split vote.
 
-Per i test locali sono stati usati valori più conservativi:
+Per i test locali sono stati usati valori conservativi:
 
 ```go
 minTimeout := 1500
@@ -137,6 +145,16 @@ go n.heartbeatLoop()
 ```
 
 `Stop()` chiude il canale `stopCh` e permette ai loop interni di terminare.
+
+Dopo l'hardening, `Stop()` chiude anche le connessioni gRPC persistenti verso i peer:
+
+```go
+for peerID, conn := range n.peerConns {
+    if err := conn.Close(); err != nil {
+        log.Printf("node %s cannot close connection to peer %s: %v", n.id, peerID, err)
+    }
+}
+```
 
 Nel file `cmd/consensus-node/main.go`, dopo la creazione del nodo, viene chiamato:
 
@@ -270,11 +288,23 @@ Questa funzione:
 - resetta il timer di elezione;
 - scrive un log informativo.
 
-Esempio di log osservato:
+L'inizializzazione delle mappe segue le regole previste da Raft:
 
-```text
-node node-1 became leader for term 3
+```go
+nextIndex := n.lastLogIndexLocked() + 1
+
+for peerID := range n.peers {
+    n.nextIndex[peerID] = nextIndex
+    n.matchIndex[peerID] = 0
+}
 ```
+
+Quindi:
+
+- `nextIndex[peer]` parte da `lastLogIndex + 1`;
+- `matchIndex[peer]` parte da `0`.
+
+Questa parte è fondamentale per la Fase 5, perché il leader userà questi valori per capire da quale entry iniziare a replicare verso ciascun follower.
 
 ---
 
@@ -343,7 +373,198 @@ Il Client Proxy, in futuro, potrà interrogare un nodo qualsiasi e scoprire il l
 
 ---
 
-## 14. Test locale effettuato
+## 14. Hardening gRPC: connessioni persistenti
+
+Prima di passare alla replicazione dei log, è stata migliorata la gestione delle connessioni gRPC tra nodi.
+
+Inizialmente, ogni `RequestVote` e ogni heartbeat potevano aprire una nuova connessione.
+
+Questo approccio funziona per un prototipo, ma diventa inefficiente quando aumenta il numero di messaggi, soprattutto nella Fase 5, dove il leader dovrà inviare molte `AppendEntries`.
+
+Sono quindi stati aggiunti alla struct `ConsensusNode` questi campi:
+
+```go
+peerConns   map[string]*grpc.ClientConn
+peerClients map[string]consensuspb.ConsensusServiceClient
+```
+
+È stata poi introdotta la funzione:
+
+```go
+func (n *ConsensusNode) getPeerClientLocked(peerID string, peerAddress string) (consensuspb.ConsensusServiceClient, error)
+```
+
+Questa funzione:
+
+1. verifica se esiste già un client gRPC verso il peer;
+2. se esiste, lo riusa;
+3. se non esiste, crea una nuova connessione;
+4. salva connessione e client nelle mappe interne.
+
+In questo modo le RPC successive verso lo stesso peer riutilizzano la stessa connessione.
+
+---
+
+## 15. Gestione peer online/offline
+
+Per evitare log troppo rumorosi, è stata aggiunta una mappa:
+
+```go
+peerOnline map[string]bool
+```
+
+Questa mappa traccia lo stato di raggiungibilità di ciascun peer.
+
+Sono state aggiunte due funzioni:
+
+```go
+func (n *ConsensusNode) markPeerOfflineLocked(peerID string, err error)
+func (n *ConsensusNode) markPeerOnlineLocked(peerID string)
+```
+
+La logica è:
+
+- se un peer passa da online a offline, viene stampato un log;
+- se un peer resta offline, non vengono stampati log ripetuti;
+- se un peer passa da offline a online, viene stampato un log.
+
+Durante i test è stato osservato questo comportamento:
+
+```text
+node node-2 marked peer node-3 as offline: ...
+node node-2 marked peer node-3 as online
+```
+
+Questo è molto più leggibile rispetto a stampare un errore per ogni heartbeat fallito.
+
+---
+
+## 16. Persistenza: introduzione del WAL append-only
+
+Prima della Fase 5 è stata evoluta la persistenza.
+
+La versione precedente usava soltanto:
+
+```text
+node-X_state.json
+```
+
+Questo file contiene uno snapshot compatto dello stato persistente corrente.
+
+La nuova versione mantiene `state.json`, ma aggiunge anche:
+
+```text
+node-X_wal.log
+```
+
+Quindi per ogni nodo si hanno file come:
+
+```text
+data/node-1/node-1_state.json
+data/node-1/node-1_wal.log
+```
+
+Il file WAL è append-only: ogni modifica dello stato persistente viene registrata come una nuova riga JSON.
+
+---
+
+## 17. Struttura del record WAL
+
+È stata introdotta la struct:
+
+```go
+type walRecord struct {
+    Timestamp   string                  `json:"timestamp"`
+    NodeID      string                  `json:"node_id"`
+    CurrentTerm uint64                  `json:"current_term"`
+    VotedFor    string                  `json:"voted_for"`
+    Log         []*consensuspb.LogEntry `json:"log"`
+}
+```
+
+In questa prima versione, ogni record WAL contiene uno snapshot dello stato persistente corrente.
+
+Questa scelta è semplice e compatibile con il recovery attuale, che continua a caricare rapidamente da `state.json`.
+
+In futuro, il WAL potrà essere raffinato usando record più specifici, per esempio:
+
+```json
+{"type":"term_updated","term":4}
+{"type":"vote_granted","term":4,"voted_for":"node-2"}
+{"type":"log_appended","entry":{}}
+```
+
+---
+
+## 18. Scrittura WAL e state.json
+
+È stata aggiunta la funzione:
+
+```go
+func (n *ConsensusNode) appendWALLocked() error
+```
+
+Questa funzione:
+
+1. crea un `walRecord`;
+2. apre il file WAL con `os.O_APPEND`;
+3. scrive una nuova riga JSON in fondo al file.
+
+La funzione `persistLocked()` è stata modificata per seguire questo flusso:
+
+```text
+1. append su wal.log
+2. aggiornamento atomico di state.json
+```
+
+Questo rispetta il principio del Write-Ahead Logging: prima si registra la modifica su un log append-only, poi si aggiorna la rappresentazione compatta dello stato.
+
+---
+
+## 19. Test del WAL
+
+È stato eseguito un test locale con un singolo nodo.
+
+Dopo l'avvio e l'elezione, sono stati verificati i file creati:
+
+```cmd
+dir data\node-1
+```
+
+Output:
+
+```text
+node-1_state.json
+node-1_wal.log
+```
+
+Il contenuto di `node-1_state.json` era:
+
+```json
+{
+  "current_term": 1,
+  "voted_for": "node-1",
+  "log": []
+}
+```
+
+Il contenuto di `node-1_wal.log` era:
+
+```json
+{"timestamp":"2026-06-23T12:40:41.1887468Z","node_id":"node-1","current_term":0,"voted_for":"","log":[]}
+{"timestamp":"2026-06-23T12:40:43.2259181Z","node_id":"node-1","current_term":1,"voted_for":"node-1","log":[]}
+```
+
+Questo dimostra che:
+
+- il file WAL viene creato;
+- i record vengono aggiunti in append;
+- `state.json` continua a rappresentare lo stato persistente corrente;
+- il nodo mantiene una traccia storica delle persistenze.
+
+---
+
+## 20. Test locale dell'elezione
 
 Sono stati avviati più nodi localmente su porte diverse.
 
@@ -386,15 +607,17 @@ Questo è coerente con un cluster a 3 nodi, dove la maggioranza è 2.
 
 ---
 
-## 15. Output significativo osservato
+## 21. Output significativo osservato
 
 Durante il test è stato osservato un leader eletto:
 
 ```text
-node node-1 became leader for term 3
+node node-3 became leader for term 1
 ```
 
-Successivamente, il client gRPC minimale ha interrogato `node-1`:
+Successivamente, il client gRPC minimale ha interrogato tutti i nodi.
+
+Verso `node-1`:
 
 ```cmd
 set TARGET=localhost:50051
@@ -404,11 +627,11 @@ go run .\cmd\bench-client
 Output:
 
 ```text
-GetLeader response: has_leader=true leader_id=node-1 leader_address=localhost:50051 term=3
-Get response: found=false value= error= leader_hint=localhost:50051
+GetLeader response: has_leader=true leader_id=node-3 leader_address=localhost:50053 term=1
+Get response: found=false value= error= leader_hint=localhost:50053
 ```
 
-Poi è stato interrogato `node-2`:
+Verso `node-2`:
 
 ```cmd
 set TARGET=localhost:50052
@@ -418,79 +641,39 @@ go run .\cmd\bench-client
 Output:
 
 ```text
-GetLeader response: has_leader=true leader_id=node-1 leader_address=localhost:50051 term=3
-Get response: found=false value= error= leader_hint=localhost:50051
+GetLeader response: has_leader=true leader_id=node-3 leader_address=localhost:50053 term=1
+Get response: found=false value= error= leader_hint=localhost:50053
+```
+
+Verso `node-3`:
+
+```cmd
+set TARGET=localhost:50053
+go run .\cmd\bench-client
+```
+
+Output:
+
+```text
+GetLeader response: has_leader=true leader_id=node-3 leader_address=localhost:50053 term=1
+Get response: found=false value= error= leader_hint=localhost:50053
 ```
 
 Questo risultato conferma che:
 
-- `node-1` è stato eletto leader;
-- `node-2` ha ricevuto heartbeat validi;
-- `node-2` conosce correttamente il leader;
-- `GetLeader` funziona anche interrogando un follower.
+- `node-3` è stato eletto leader;
+- `node-1` e `node-2` hanno ricevuto heartbeat validi;
+- tutti i nodi conoscono correttamente il leader;
+- `GetLeader` funziona anche interrogando follower.
 
 ---
 
-## 16. Caso node-3 offline
-
-Durante un test, `node-3` è stato fermato accidentalmente con `CTRL+C`.
-
-Di conseguenza, il client verso `localhost:50053` ha restituito:
-
-```text
-GetLeader failed: rpc error: code = Unavailable
-```
-
-Questo non indica un errore dell'algoritmo, ma semplicemente che il processo del nodo non era in esecuzione.
-
-Anche il leader ha stampato errori di heartbeat verso `node-3`, perché continuava a tentare di raggiungerlo.
-
-Questo comportamento è corretto: un leader prova comunque a comunicare con tutti i peer conosciuti.
-
----
-
-## 17. Pulizia dei log degli heartbeat falliti
-
-Durante i test iniziali, i log risultavano troppo rumorosi quando un peer era offline.
-
-Il problema era causato dal fatto che ogni heartbeat fallito veniva loggato.
-
-Esempio:
-
-```text
-leader node-1 heartbeat to node-3 failed: ...
-```
-
-Poiché il leader invia heartbeat periodici, un peer spento generava molti messaggi ripetuti.
-
-Per migliorare la leggibilità dei test locali, sono state previste due azioni:
-
-1. aumentare gli intervalli temporali;
-2. ridurre o controllare la verbosità dei log sugli heartbeat falliti.
-
-Gli intervalli usati sono stati resi più conservativi:
-
-```go
-heartbeatInterval: 300 * time.Millisecond
-```
-
-```go
-minTimeout := 1500
-maxTimeout := 3000
-```
-
-Questa scelta rende l'elezione più stabile e riduce la frequenza degli heartbeat falliti.
-
-Una possibile evoluzione ulteriore sarà loggare il fallimento verso un peer solo al cambio di stato, ad esempio quando un peer passa da raggiungibile a non raggiungibile.
-
----
-
-## 18. Verifica tramite go test
+## 22. Verifica tramite go test
 
 Dopo le modifiche è stato eseguito:
 
 ```cmd
-gofmt -w internal\consensus\node.go cmd\consensus-node\main.go
+gofmt -w internal\consensus\node.go
 go test ./...
 ```
 
@@ -498,9 +681,9 @@ Il comando `go test ./...` compila tutti i package e verifica che non ci siano e
 
 ---
 
-## 19. Stato finale della Fase 4
+## 23. Stato finale della Fase 4 e hardening pre-Fase 5
 
-La Fase 4 può essere considerata implementata nella sua versione base.
+La Fase 4 può essere considerata implementata nella sua versione base e rafforzata con interventi infrastrutturali.
 
 Checklist:
 
@@ -514,17 +697,24 @@ Checklist:
 [OK] Controllo freschezza del log in RequestVote
 [OK] Calcolo della maggioranza
 [OK] Transizione Candidate -> Leader
+[OK] Inizializzazione corretta di nextIndex e matchIndex
 [OK] Invio heartbeat periodici
 [OK] AppendEntries usata come heartbeat
 [OK] Reset del timer alla ricezione di heartbeat
 [OK] GetLeader restituisce il leader noto
+[OK] Connessioni gRPC persistenti verso peer
+[OK] Tracking peer online/offline
+[OK] Log heartbeat falliti puliti
+[OK] WAL append-only minimale
+[OK] state.json ancora usato per recovery rapido
 [OK] Test locale con leader eletto
-[OK] Test locale con follower che riconosce il leader
+[OK] Test locale con follower che riconoscono il leader
+[OK] go test ./... superato
 ```
 
 ---
 
-## 20. Limiti attuali
+## 24. Limiti attuali
 
 La Fase 4 non include ancora la replicazione atomica completa dei log.
 
@@ -534,15 +724,16 @@ In particolare mancano:
 - risoluzione dei conflitti nel log;
 - aggiornamento reale di `nextIndex` e `matchIndex` durante la replica;
 - commit di una entry solo dopo replica su quorum;
-- gestione avanzata di peer offline;
-- riuso persistente delle connessioni gRPC;
-- WAL append-only completo.
+- replay del WAL per recovery completo in assenza di `state.json`;
+- record WAL granulari per evento;
+- snapshot reali;
+- compattazione del log.
 
-Questi aspetti saranno affrontati nella fase successiva.
+Questi aspetti saranno affrontati nelle fasi successive.
 
 ---
 
-## 21. Prossimo obiettivo
+## 25. Prossimo obiettivo
 
 Il prossimo obiettivo è:
 
