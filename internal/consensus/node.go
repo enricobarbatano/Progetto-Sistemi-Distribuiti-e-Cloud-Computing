@@ -20,15 +20,14 @@
 package consensus
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
+
 	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"os"
-	"path/filepath"
+
 	"strconv"
 	"sync"
 	"time"
@@ -36,41 +35,13 @@ import (
 	consensuspb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/consensuspb"
 	kvpb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/kvpb"
 
+	"github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/internal/persistence"
 	"github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/internal/storage"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 const defaultSnapshotThreshold uint64 = 1000
-
-type persistentState struct {
-	CurrentTerm uint64                  `json:"current_term"`
-	VotedFor    string                  `json:"voted_for"`
-	Log         []*consensuspb.LogEntry `json:"log"`
-
-	CommitIndex uint64            `json:"commit_index"`
-	LastApplied uint64            `json:"last_applied"`
-	Data        map[string]string `json:"data"`
-}
-
-type walRecord struct {
-	Timestamp   string                  `json:"timestamp"`
-	NodeID      string                  `json:"node_id"`
-	CurrentTerm uint64                  `json:"current_term"`
-	VotedFor    string                  `json:"voted_for"`
-	Log         []*consensuspb.LogEntry `json:"log"`
-
-	CommitIndex uint64            `json:"commit_index"`
-	LastApplied uint64            `json:"last_applied"`
-	Data        map[string]string `json:"data"`
-}
-
-type snapshotState struct {
-	LastIncludedIndex uint64            `json:"last_included_index"`
-	LastIncludedTerm  uint64            `json:"last_included_term"`
-	Data              map[string]string `json:"data"`
-}
 
 type ConsensusNode struct {
 	consensuspb.UnimplementedConsensusServiceServer
@@ -99,9 +70,12 @@ type ConsensusNode struct {
 	// ma applica le entry committed delegando allo storage.
 	store *storage.KVStore
 
-	stateFile         string
-	walFile           string
-	snapshotFile      string
+	// persistenceManager gestisce state.json, WAL e snapshot locali.
+	//
+	// ConsensusNode decide quando salvare o caricare lo stato, ma non conosce più
+	// i dettagli dei file JSON o WAL.
+	persistenceManager *persistence.Manager
+
 	snapshotThreshold uint64
 
 	electionResetCh chan struct{}
@@ -149,10 +123,8 @@ func NewConsensusNode(id string, address string, peers map[string]string, dataDi
 
 		store: storage.NewKVStore(),
 
-		stateFile:         filepath.Join(dataDir, fmt.Sprintf("%s_state.json", id)),
-		walFile:           filepath.Join(dataDir, fmt.Sprintf("%s_wal.log", id)),
-		snapshotFile:      filepath.Join(dataDir, fmt.Sprintf("%s_snapshot.json", id)),
-		snapshotThreshold: readUint64Env("SNAPSHOT_THRESHOLD", defaultSnapshotThreshold),
+		persistenceManager: persistence.NewManager(id, dataDir),
+		snapshotThreshold:  readUint64Env("SNAPSHOT_THRESHOLD", defaultSnapshotThreshold),
 
 		electionResetCh: make(chan struct{}, 1),
 		stopCh:          make(chan struct{}),
@@ -254,92 +226,6 @@ func (n *ConsensusNode) cloneDataLocked() map[string]string {
 	return n.store.Snapshot()
 }
 
-func (n *ConsensusNode) appendWALLocked() error {
-	record := walRecord{
-		Timestamp:   time.Now().UTC().Format(time.RFC3339Nano),
-		NodeID:      n.id,
-		CurrentTerm: n.currentTerm,
-		VotedFor:    n.votedFor,
-		Log:         n.log,
-		CommitIndex: n.commitIndex,
-		LastApplied: n.lastApplied,
-		Data:        n.cloneDataLocked(),
-	}
-
-	file, err := os.OpenFile(n.walFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("cannot open wal file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	if err := encoder.Encode(record); err != nil {
-		return fmt.Errorf("cannot append wal record: %w", err)
-	}
-
-	return nil
-}
-
-func (n *ConsensusNode) persistLocked() error {
-	if err := n.appendWALLocked(); err != nil {
-		return err
-	}
-
-	state := persistentState{
-		CurrentTerm: n.currentTerm,
-		VotedFor:    n.votedFor,
-		Log:         n.log,
-		CommitIndex: n.commitIndex,
-		LastApplied: n.lastApplied,
-		Data:        n.cloneDataLocked(),
-	}
-
-	content, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("cannot marshal persistent state: %w", err)
-	}
-
-	tmpFile := n.stateFile + ".tmp"
-	if err := os.WriteFile(tmpFile, content, 0644); err != nil {
-		return fmt.Errorf("cannot write temporary state file: %w", err)
-	}
-
-	if err := os.Rename(tmpFile, n.stateFile); err != nil {
-		return fmt.Errorf("cannot replace state file: %w", err)
-	}
-
-	return nil
-}
-
-func (n *ConsensusNode) saveSnapshotLocked() error {
-	if n.lastApplied == 0 {
-		return nil
-	}
-
-	lastIncludedTerm, _ := n.logTermAtIndexLocked(n.lastApplied)
-	snapshot := snapshotState{
-		LastIncludedIndex: n.lastApplied,
-		LastIncludedTerm:  lastIncludedTerm,
-		Data:              n.cloneDataLocked(),
-	}
-
-	content, err := json.MarshalIndent(snapshot, "", "  ")
-	if err != nil {
-		return fmt.Errorf("cannot marshal snapshot: %w", err)
-	}
-
-	tmpFile := n.snapshotFile + ".tmp"
-	if err := os.WriteFile(tmpFile, content, 0644); err != nil {
-		return fmt.Errorf("cannot write temporary snapshot file: %w", err)
-	}
-
-	if err := os.Rename(tmpFile, n.snapshotFile); err != nil {
-		return fmt.Errorf("cannot replace snapshot file: %w", err)
-	}
-
-	return nil
-}
-
 func (n *ConsensusNode) maybeSaveSnapshotLocked() {
 	if n.lastApplied == 0 || n.snapshotThreshold == 0 {
 		return
@@ -354,131 +240,80 @@ func (n *ConsensusNode) maybeSaveSnapshotLocked() {
 	}
 }
 
+// refactoring manager.go
+func (n *ConsensusNode) persistentStateLocked() persistence.State {
+	return persistence.State{
+		CurrentTerm: n.currentTerm,
+		VotedFor:    n.votedFor,
+		Log:         n.log,
+		CommitIndex: n.commitIndex,
+		LastApplied: n.lastApplied,
+		Data:        n.cloneDataLocked(),
+	}
+}
+
+func (n *ConsensusNode) persistLocked() error {
+	return n.persistenceManager.Save(n.persistentStateLocked())
+}
+
+func (n *ConsensusNode) saveSnapshotLocked() error {
+	if n.lastApplied == 0 {
+		return nil
+	}
+
+	lastIncludedTerm, _ := n.logTermAtIndexLocked(n.lastApplied)
+
+	return n.persistenceManager.SaveSnapshot(persistence.Snapshot{
+		LastIncludedIndex: n.lastApplied,
+		LastIncludedTerm:  lastIncludedTerm,
+		Data:              n.cloneDataLocked(),
+	})
+}
+
 func (n *ConsensusNode) loadPersistentState() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	state, err := n.readStateFileLocked()
+	state, stateFound, err := n.persistenceManager.Load()
 	if err != nil {
-		if os.IsNotExist(err) {
-			walState, walErr := n.readLatestStateFromWALLocked()
-			if walErr != nil {
-				if os.IsNotExist(walErr) {
-					if err := n.loadSnapshotIfNewerLocked(); err != nil {
-						return err
-					}
-
-					return n.persistLocked()
-				}
-
-				return walErr
-			}
-
-			n.restorePersistentStateLocked(walState)
-			if err := n.loadSnapshotIfNewerLocked(); err != nil {
-				return err
-			}
-
-			if n.commitIndex > n.lastApplied {
-				n.applyCommittedEntriesLocked()
-			}
-
-			return n.persistLocked()
-		}
-
 		return err
 	}
 
-	n.restorePersistentStateLocked(state)
-	if err := n.loadSnapshotIfNewerLocked(); err != nil {
+	if stateFound {
+		n.restorePersistentStateLocked(state)
+	}
+
+	snapshot, snapshotFound, err := n.persistenceManager.LoadSnapshot()
+	if err != nil {
 		return err
 	}
 
+	snapshotApplied := false
+	if snapshotFound {
+		snapshotApplied = n.restoreSnapshotIfNewerLocked(snapshot)
+	}
+
+	committedEntriesApplied := false
 	if n.commitIndex > n.lastApplied {
+		previousLastApplied := n.lastApplied
 		n.applyCommittedEntriesLocked()
+		committedEntriesApplied = n.lastApplied != previousLastApplied
+	}
+
+	if !stateFound || snapshotApplied || committedEntriesApplied {
+		return n.persistLocked()
 	}
 
 	return nil
 }
 
-func (n *ConsensusNode) readStateFileLocked() (*persistentState, error) {
-	content, err := os.ReadFile(n.stateFile)
-	if err != nil {
-		return nil, err
-	}
-
-	var state persistentState
-	if err := json.Unmarshal(content, &state); err != nil {
-		return nil, fmt.Errorf("cannot unmarshal persistent state: %w", err)
-	}
-
-	return &state, nil
-}
-
-func (n *ConsensusNode) readLatestStateFromWALLocked() (*persistentState, error) {
-	file, err := os.Open(n.walFile)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var latest *persistentState
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024), 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		var record walRecord
-		if err := json.Unmarshal(line, &record); err != nil {
-			continue
-		}
-
-		latest = &persistentState{
-			CurrentTerm: record.CurrentTerm,
-			VotedFor:    record.VotedFor,
-			Log:         record.Log,
-			CommitIndex: record.CommitIndex,
-			LastApplied: record.LastApplied,
-			Data:        record.Data,
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("cannot scan wal file: %w", err)
-	}
-
-	if latest == nil {
-		return nil, os.ErrNotExist
-	}
-
-	return latest, nil
-}
-
-func (n *ConsensusNode) loadSnapshotIfNewerLocked() error {
-	content, err := os.ReadFile(n.snapshotFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-
-		return fmt.Errorf("cannot read snapshot file: %w", err)
-	}
-
-	var snapshot snapshotState
-	if err := json.Unmarshal(content, &snapshot); err != nil {
-		return fmt.Errorf("cannot unmarshal snapshot: %w", err)
-	}
-
+func (n *ConsensusNode) restoreSnapshotIfNewerLocked(snapshot persistence.Snapshot) bool {
 	if snapshot.Data == nil {
-		return nil
+		return false
 	}
 
 	if snapshot.LastIncludedIndex <= n.lastApplied {
-		return nil
+		return false
 	}
 
 	n.store.Restore(snapshot.Data)
@@ -488,10 +323,10 @@ func (n *ConsensusNode) loadSnapshotIfNewerLocked() error {
 		n.commitIndex = snapshot.LastIncludedIndex
 	}
 
-	return nil
+	return true
 }
 
-func (n *ConsensusNode) restorePersistentStateLocked(state *persistentState) {
+func (n *ConsensusNode) restorePersistentStateLocked(state persistence.State) {
 	n.currentTerm = state.CurrentTerm
 	n.votedFor = state.VotedFor
 
