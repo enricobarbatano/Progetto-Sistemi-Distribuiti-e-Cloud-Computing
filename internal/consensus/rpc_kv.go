@@ -4,9 +4,12 @@
 //
 // Le RPC Put e Delete non modificano direttamente la state machine: passano
 // prima dal log Raft e vengono applicate solo dopo replica su quorum.
-// La RPC Get viene servita solo dal leader, così si evitano letture stale dai
-// follower. GetLeader invece permette al client o al proxy di scoprire il
-// leader attualmente noto.
+//
+// La RPC Get viene servita solo dal leader. Prima di rispondere, però, il leader
+// effettua anche un controllo di quorum tramite heartbeat vuoti, così evita di
+// servire letture da un leader potenzialmente isolato.
+//
+// GetLeader permette al client o al proxy di scoprire il leader attualmente noto.
 package consensus
 
 import (
@@ -41,18 +44,36 @@ func (n *ConsensusNode) Put(ctx context.Context, req *kvpb.PutRequest) (*kvpb.Pu
 
 // Get gestisce una richiesta di lettura dallo storage key-value.
 //
-// In questa fase le letture vengono servite solo dal leader per evitare che un
-// follower non ancora aggiornato restituisca dati stale. Se il nodo non è leader,
-// risponde con leader_hint.
+// La lettura viene servita solo dal leader. Prima di leggere dalla state machine,
+// il leader verifica di avere ancora contatto con la maggioranza del cluster.
+// Questo è un controllo in stile Read-Index semplificato: non introduce una
+// nuova RPC, ma riusa heartbeat AppendEntries vuoti.
 func (n *ConsensusNode) Get(ctx context.Context, req *kvpb.GetRequest) (*kvpb.GetResponse, error) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	if n.role != consensuspb.NodeRole_NODE_ROLE_LEADER {
+		leaderHint := n.leaderAddress
+		n.mu.Unlock()
+
 		return &kvpb.GetResponse{
 			Found:      false,
 			Error:      "node is not leader",
-			LeaderHint: n.leaderAddress,
+			LeaderHint: leaderHint,
+		}, nil
+	}
+
+	leaderHint := n.leaderAddress
+	n.mu.Unlock()
+
+	if !n.confirmLeadershipWithQuorum(ctx) {
+		n.mu.Lock()
+		leaderHint = n.leaderAddress
+		n.mu.Unlock()
+
+		return &kvpb.GetResponse{
+			Found:      false,
+			Error:      "leader quorum unavailable",
+			LeaderHint: leaderHint,
 		}, nil
 	}
 
@@ -60,14 +81,14 @@ func (n *ConsensusNode) Get(ctx context.Context, req *kvpb.GetRequest) (*kvpb.Ge
 	if !ok {
 		return &kvpb.GetResponse{
 			Found:      false,
-			LeaderHint: n.leaderAddress,
+			LeaderHint: leaderHint,
 		}, nil
 	}
 
 	return &kvpb.GetResponse{
 		Found:      true,
 		Value:      value,
-		LeaderHint: n.leaderAddress,
+		LeaderHint: leaderHint,
 	}, nil
 }
 

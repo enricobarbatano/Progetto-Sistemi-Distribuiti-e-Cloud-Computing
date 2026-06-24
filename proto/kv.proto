@@ -6,7 +6,6 @@ option go_package = "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-C
 
 // KeyValueService espone le operazioni sullo storage chiave-valore.
 // Il Client Proxy userà queste RPC per parlare con il cluster di consenso.
-
 service KeyValueService {
   // Memorizza o aggiorna una coppia chiave-valore.
   rpc Put(PutRequest) returns (PutResponse);
@@ -43,6 +42,10 @@ message PutResponse {
 // Richiesta Get.
 message GetRequest {
   string key = 1;
+
+  // Identificativo opzionale della richiesta.
+  // Utile per logging, tracciamento e futuri meccanismi Read-Index.
+  string request_id = 2;
 }
 
 // Risposta Get.

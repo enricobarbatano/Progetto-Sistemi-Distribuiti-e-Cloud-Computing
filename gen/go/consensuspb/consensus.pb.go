@@ -413,10 +413,20 @@ func (x *AppendEntriesRequest) GetLeaderCommit() uint64 {
 
 // Risposta ad AppendEntries.
 type AppendEntriesResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
-	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
-	MatchIndex    uint64                 `protobuf:"varint,3,opt,name=match_index,json=matchIndex,proto3" json:"match_index,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Term       uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	Success    bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
+	MatchIndex uint64                 `protobuf:"varint,3,opt,name=match_index,json=matchIndex,proto3" json:"match_index,omitempty"`
+	// Informazioni usate dal leader per il fast back-off.
+	//
+	// Se success=false, il follower può indicare al leader un punto più utile
+	// da cui riprovare la replica, evitando di decrementare nextIndex di uno
+	// alla volta.
+	//
+	// conflict_term vale 0 quando il follower non possiede alcuna entry
+	// all'indice richiesto.
+	ConflictIndex uint64 `protobuf:"varint,4,opt,name=conflict_index,json=conflictIndex,proto3" json:"conflict_index,omitempty"`
+	ConflictTerm  uint64 `protobuf:"varint,5,opt,name=conflict_term,json=conflictTerm,proto3" json:"conflict_term,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -468,6 +478,20 @@ func (x *AppendEntriesResponse) GetSuccess() bool {
 func (x *AppendEntriesResponse) GetMatchIndex() uint64 {
 	if x != nil {
 		return x.MatchIndex
+	}
+	return 0
+}
+
+func (x *AppendEntriesResponse) GetConflictIndex() uint64 {
+	if x != nil {
+		return x.ConflictIndex
+	}
+	return 0
+}
+
+func (x *AppendEntriesResponse) GetConflictTerm() uint64 {
+	if x != nil {
+		return x.ConflictTerm
 	}
 	return 0
 }
@@ -643,12 +667,14 @@ const file_proto_consensus_proto_rawDesc = "" +
 	"\x0eprev_log_index\x18\x03 \x01(\x04R\fprevLogIndex\x12\"\n" +
 	"\rprev_log_term\x18\x04 \x01(\x04R\vprevLogTerm\x12-\n" +
 	"\aentries\x18\x05 \x03(\v2\x13.consensus.LogEntryR\aentries\x12#\n" +
-	"\rleader_commit\x18\x06 \x01(\x04R\fleaderCommit\"f\n" +
+	"\rleader_commit\x18\x06 \x01(\x04R\fleaderCommit\"\xb2\x01\n" +
 	"\x15AppendEntriesResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x1f\n" +
 	"\vmatch_index\x18\x03 \x01(\x04R\n" +
-	"matchIndex\"\xe7\x01\n" +
+	"matchIndex\x12%\n" +
+	"\x0econflict_index\x18\x04 \x01(\x04R\rconflictIndex\x12#\n" +
+	"\rconflict_term\x18\x05 \x01(\x04R\fconflictTerm\"\xe7\x01\n" +
 	"\x16InstallSnapshotRequest\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x1b\n" +
 	"\tleader_id\x18\x02 \x01(\tR\bleaderId\x12.\n" +

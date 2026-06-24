@@ -263,6 +263,40 @@ func (m *Manager) LoadSnapshot() (Snapshot, bool, error) {
 	return snapshot, true, nil
 }
 
+// EncodeSnapshot serializza uno snapshot in JSON.
+//
+// Viene usata dal leader per inserire lo snapshot nel campo bytes della RPC
+// InstallSnapshot. La funzione vive nel package persistence perché conosce la
+// struttura persistente dello snapshot, ma non conosce la logica Raft.
+func EncodeSnapshot(snapshot Snapshot) ([]byte, error) {
+	snapshot.Data = cloneData(snapshot.Data)
+
+	content, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode snapshot: %w", err)
+	}
+
+	return content, nil
+}
+
+// DecodeSnapshot deserializza uno snapshot ricevuto tramite InstallSnapshot.
+//
+// Viene usata dal follower quando riceve uno snapshot remoto dal leader.
+func DecodeSnapshot(data []byte) (Snapshot, error) {
+	if len(data) == 0 {
+		return Snapshot{}, fmt.Errorf("snapshot data cannot be empty")
+	}
+
+	var snapshot Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return Snapshot{}, fmt.Errorf("cannot decode snapshot: %w", err)
+	}
+
+	snapshot.Data = cloneData(snapshot.Data)
+
+	return snapshot, nil
+}
+
 func (m *Manager) eventsFromState(state State) []walEvent {
 	if m.lastState == nil {
 		return m.initialEvents(state)

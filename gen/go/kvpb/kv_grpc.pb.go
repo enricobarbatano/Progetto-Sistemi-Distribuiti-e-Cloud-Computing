@@ -28,6 +28,9 @@ const (
 // KeyValueServiceClient is the client API for KeyValueService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// KeyValueService espone le operazioni sullo storage chiave-valore.
+// Il Client Proxy userà queste RPC per parlare con il cluster di consenso.
 type KeyValueServiceClient interface {
 	// Memorizza o aggiorna una coppia chiave-valore.
 	Put(ctx context.Context, in *PutRequest, opts ...grpc.CallOption) (*PutResponse, error)
@@ -90,6 +93,9 @@ func (c *keyValueServiceClient) GetLeader(ctx context.Context, in *GetLeaderRequ
 // KeyValueServiceServer is the server API for KeyValueService service.
 // All implementations must embed UnimplementedKeyValueServiceServer
 // for forward compatibility.
+//
+// KeyValueService espone le operazioni sullo storage chiave-valore.
+// Il Client Proxy userà queste RPC per parlare con il cluster di consenso.
 type KeyValueServiceServer interface {
 	// Memorizza o aggiorna una coppia chiave-valore.
 	Put(context.Context, *PutRequest) (*PutResponse, error)
