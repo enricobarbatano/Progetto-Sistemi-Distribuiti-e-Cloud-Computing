@@ -3,6 +3,7 @@ module github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing
 go 1.25.4
 
 require (
+	github.com/sony/gobreaker/v2 v2.4.0
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 )
