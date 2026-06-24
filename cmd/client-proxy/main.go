@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
+	"time"
 
 	kvpb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/kvpb"
 	"github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/internal/proxy"
@@ -16,6 +18,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("cannot load proxy config: %v", err)
 	}
+
+	healthServer := proxy.StartHealthServer(config.HealthPort)
+	defer shutdownHealthServer(healthServer)
 
 	listenAddress := fmt.Sprintf(":%s", config.Port)
 
@@ -51,5 +56,16 @@ func main() {
 
 	if err := grpcServer.Serve(listener); err != nil {
 		log.Fatalf("client proxy stopped with error: %v", err)
+	}
+}
+
+func shutdownHealthServer(server interface {
+	Shutdown(ctx context.Context) error
+}) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("cannot shutdown health server cleanly: %v", err)
 	}
 }

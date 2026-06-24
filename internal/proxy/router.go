@@ -17,6 +17,8 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"math"
+	"math/rand"
 	"time"
 
 	kvpb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/kvpb"
@@ -49,9 +51,9 @@ func NewRouter(config Config, cache *LeaderCache, client *NodeClient, breakers *
 // DiscoverLeader interroga i seed nodes finché non trova un leader noto.
 //
 // Se un nodo risponde con has_leader=true, il Router aggiorna la LeaderCache e
-// restituisce l'indirizzo del leader. Le chiamate sono protette dal Circuit
+// restituisce le informazioni del leader. Le chiamate sono protette dal Circuit
 // Breaker del nodo interrogato.
-func (r *Router) DiscoverLeader(ctx context.Context) (string, error) {
+func (r *Router) DiscoverLeader(ctx context.Context) (LeaderInfo, error) {
 	var lastErr error
 
 	for _, address := range r.config.ConsensusNodes {
@@ -70,16 +72,29 @@ func (r *Router) DiscoverLeader(ctx context.Context) (string, error) {
 		}
 
 		if leaderResp.HasLeader && leaderResp.LeaderAddress != "" {
-			r.cache.Set(leaderResp.LeaderAddress)
-			return leaderResp.LeaderAddress, nil
+			info := LeaderInfo{
+				ID:      leaderResp.LeaderId,
+				Address: leaderResp.LeaderAddress,
+				Term:    leaderResp.Term,
+			}
+			r.cache.Set(info)
+			return info, nil
 		}
 	}
 
 	if lastErr != nil {
-		return "", fmt.Errorf("cannot discover leader: %w", lastErr)
+		return LeaderInfo{}, fmt.Errorf("cannot discover leader: %w", lastErr)
 	}
 
-	return "", fmt.Errorf("cannot discover leader: no seed node reported a leader")
+	return LeaderInfo{}, fmt.Errorf("cannot discover leader: no seed node reported a leader")
+}
+
+// LeaderInfo restituisce il leader noto oppure lo scopre interrogando i seed nodes.
+//
+// Questo metodo viene usato anche da ProxyService.GetLeader per restituire al
+// client una risposta più completa con leader_id e term quando disponibili.
+func (r *Router) LeaderInfo(ctx context.Context) (LeaderInfo, error) {
+	return r.leaderOrDiscover(ctx)
 }
 
 // Put inoltra una richiesta Put al leader corrente.
@@ -91,15 +106,15 @@ func (r *Router) Put(ctx context.Context, key string, value string) (*kvpb.PutRe
 	var lastErr error
 
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		leaderAddress, err := r.leaderOrDiscover(ctx)
+		leader, err := r.leaderOrDiscover(ctx)
 		if err != nil {
 			lastErr = err
 			r.sleepBeforeRetry(attempt)
 			continue
 		}
 
-		response, err := r.executeWithBreaker(ctx, leaderAddress, func(callCtx context.Context) (any, error) {
-			return r.client.Put(callCtx, leaderAddress, key, value)
+		response, err := r.executeWithBreaker(ctx, leader.Address, func(callCtx context.Context) (any, error) {
+			return r.client.Put(callCtx, leader.Address, key, value)
 		})
 		if err != nil {
 			lastErr = err
@@ -110,7 +125,7 @@ func (r *Router) Put(ctx context.Context, key string, value string) (*kvpb.PutRe
 
 		putResp, ok := response.(*kvpb.PutResponse)
 		if !ok {
-			lastErr = fmt.Errorf("unexpected Put response type from %s", leaderAddress)
+			lastErr = fmt.Errorf("unexpected Put response type from %s", leader.Address)
 			r.cache.Clear()
 			r.sleepBeforeRetry(attempt)
 			continue
@@ -147,15 +162,15 @@ func (r *Router) Get(ctx context.Context, key string) (*kvpb.GetResponse, error)
 	var lastErr error
 
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		leaderAddress, err := r.leaderOrDiscover(ctx)
+		leader, err := r.leaderOrDiscover(ctx)
 		if err != nil {
 			lastErr = err
 			r.sleepBeforeRetry(attempt)
 			continue
 		}
 
-		response, err := r.executeWithBreaker(ctx, leaderAddress, func(callCtx context.Context) (any, error) {
-			return r.client.Get(callCtx, leaderAddress, key)
+		response, err := r.executeWithBreaker(ctx, leader.Address, func(callCtx context.Context) (any, error) {
+			return r.client.Get(callCtx, leader.Address, key)
 		})
 		if err != nil {
 			lastErr = err
@@ -166,7 +181,7 @@ func (r *Router) Get(ctx context.Context, key string) (*kvpb.GetResponse, error)
 
 		getResp, ok := response.(*kvpb.GetResponse)
 		if !ok {
-			lastErr = fmt.Errorf("unexpected Get response type from %s", leaderAddress)
+			lastErr = fmt.Errorf("unexpected Get response type from %s", leader.Address)
 			r.cache.Clear()
 			r.sleepBeforeRetry(attempt)
 			continue
@@ -203,15 +218,15 @@ func (r *Router) Delete(ctx context.Context, key string) (*kvpb.DeleteResponse, 
 	var lastErr error
 
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		leaderAddress, err := r.leaderOrDiscover(ctx)
+		leader, err := r.leaderOrDiscover(ctx)
 		if err != nil {
 			lastErr = err
 			r.sleepBeforeRetry(attempt)
 			continue
 		}
 
-		response, err := r.executeWithBreaker(ctx, leaderAddress, func(callCtx context.Context) (any, error) {
-			return r.client.Delete(callCtx, leaderAddress, key)
+		response, err := r.executeWithBreaker(ctx, leader.Address, func(callCtx context.Context) (any, error) {
+			return r.client.Delete(callCtx, leader.Address, key)
 		})
 		if err != nil {
 			lastErr = err
@@ -222,7 +237,7 @@ func (r *Router) Delete(ctx context.Context, key string) (*kvpb.DeleteResponse, 
 
 		deleteResp, ok := response.(*kvpb.DeleteResponse)
 		if !ok {
-			lastErr = fmt.Errorf("unexpected Delete response type from %s", leaderAddress)
+			lastErr = fmt.Errorf("unexpected Delete response type from %s", leader.Address)
 			r.cache.Clear()
 			r.sleepBeforeRetry(attempt)
 			continue
@@ -252,9 +267,9 @@ func (r *Router) Delete(ctx context.Context, key string) (*kvpb.DeleteResponse, 
 
 // leaderOrDiscover restituisce il leader dalla cache o lo scopre interrogando
 // i seed nodes.
-func (r *Router) leaderOrDiscover(ctx context.Context) (string, error) {
-	if leaderAddress, ok := r.cache.Get(); ok {
-		return leaderAddress, nil
+func (r *Router) leaderOrDiscover(ctx context.Context) (LeaderInfo, error) {
+	if leader, ok := r.cache.Get(); ok {
+		return leader, nil
 	}
 
 	return r.DiscoverLeader(ctx)
@@ -274,10 +289,11 @@ func (r *Router) executeWithBreaker(ctx context.Context, address string, call fu
 	})
 }
 
-// sleepBeforeRetry applica un backoff semplice tra retry successivi.
+// sleepBeforeRetry applica exponential backoff con jitter.
 //
-// Per ora usa un backoff lineare basato sul numero di attempt. Se Backoff è 0,
-// non aspetta.
+// Il delay cresce esponenzialmente in base al numero di attempt e viene limitato
+// da MaxBackoff. Il jitter evita che molte richieste ritentino tutte nello
+// stesso istante dopo un errore temporaneo.
 func (r *Router) sleepBeforeRetry(attempt int) {
 	if r.config.Backoff <= 0 {
 		return
@@ -287,6 +303,28 @@ func (r *Router) sleepBeforeRetry(attempt int) {
 		return
 	}
 
-	delay := time.Duration(attempt+1) * r.config.Backoff
+	delay := r.exponentialBackoffDelay(attempt)
 	time.Sleep(delay)
+}
+
+func (r *Router) exponentialBackoffDelay(attempt int) time.Duration {
+	multiplier := math.Pow(2, float64(attempt))
+	delay := time.Duration(float64(r.config.Backoff) * multiplier)
+
+	if r.config.MaxBackoff > 0 && delay > r.config.MaxBackoff {
+		delay = r.config.MaxBackoff
+	}
+
+	if r.config.JitterRatio <= 0 || delay <= 0 {
+		return delay
+	}
+
+	maxJitter := time.Duration(float64(delay) * float64(r.config.JitterRatio) / 100.0)
+	if maxJitter <= 0 {
+		return delay
+	}
+
+	jitter := time.Duration(rand.Int63n(int64(maxJitter) + 1))
+
+	return delay + jitter
 }

@@ -1,12 +1,10 @@
 // Package consensus contiene la logica del protocollo di consenso.
 //
 // Questo file raccoglie la parte di ConsensusNode legata allo stato persistente,
-// al recovery e all'applicazione delle entry committed alla state machine.
+// al recovery, agli snapshot locali e all'applicazione delle entry committed.
 //
 // La persistenza fisica dei file è delegata a internal/persistence, mentre la
-// mappa key-value è delegata a internal/storage. Questo file resta nel package
-// consensus perché coordina questi componenti con gli indici Raft commitIndex
-// e lastApplied.
+// mappa key-value è delegata a internal/storage.
 package consensus
 
 import (
@@ -17,61 +15,66 @@ import (
 )
 
 // cloneDataLocked restituisce una copia dello stato key-value corrente.
-//
-// Il ConsensusNode non accede direttamente alla mappa dati, ma chiede allo
-// store uno snapshot della state machine. Deve essere chiamata quando lo stato
-// del nodo è già protetto dal lock del ConsensusNode.
 func (n *ConsensusNode) cloneDataLocked() map[string]string {
 	return n.store.Snapshot()
 }
 
 // persistentStateLocked costruisce lo stato persistente corrente del nodo.
-//
-// Questa funzione traduce i campi interni di ConsensusNode nella struct
-// persistence.State, che poi viene salvata dal Persistence Manager.
 func (n *ConsensusNode) persistentStateLocked() persistence.State {
 	return persistence.State{
-		CurrentTerm: n.currentTerm,
-		VotedFor:    n.votedFor,
-		Log:         n.log,
-		CommitIndex: n.commitIndex,
-		LastApplied: n.lastApplied,
-		Data:        n.cloneDataLocked(),
+		CurrentTerm:       n.currentTerm,
+		VotedFor:          n.votedFor,
+		Log:               n.log,
+		CommitIndex:       n.commitIndex,
+		LastApplied:       n.lastApplied,
+		Data:              n.cloneDataLocked(),
+		LastIncludedIndex: n.lastIncludedIndex,
+		LastIncludedTerm:  n.lastIncludedTerm,
 	}
 }
 
 // persistLocked salva lo stato corrente del nodo.
-//
-// ConsensusNode decide quando salvare, ma non conosce più i dettagli di
-// state.json, WAL e file temporanei. Questi dettagli sono responsabilità del
-// persistence.Manager.
 func (n *ConsensusNode) persistLocked() error {
 	return n.persistenceManager.Save(n.persistentStateLocked())
 }
 
-// saveSnapshotLocked salva uno snapshot locale della state machine.
+// saveSnapshotLocked salva uno snapshot locale e compatta il log.
 //
-// Lo snapshot contiene l'ultimo indice applicato, il termine corrispondente e
-// una copia della mappa key-value. Per ora non esegue log compaction.
+// Lo snapshot diventa il checkpoint reale della state machine fino a
+// lastApplied. Dopo il salvataggio, le entry con indice <= lastApplied vengono
+// rimosse dal log fisico.
 func (n *ConsensusNode) saveSnapshotLocked() error {
 	if n.lastApplied == 0 {
 		return nil
 	}
 
-	lastIncludedTerm, _ := n.logTermAtIndexLocked(n.lastApplied)
+	if n.lastApplied <= n.lastIncludedIndex {
+		return nil
+	}
 
-	return n.persistenceManager.SaveSnapshot(persistence.Snapshot{
+	lastIncludedTerm, ok := n.logTermAtIndexLocked(n.lastApplied)
+	if !ok {
+		return nil
+	}
+
+	snapshot := persistence.Snapshot{
 		LastIncludedIndex: n.lastApplied,
 		LastIncludedTerm:  lastIncludedTerm,
 		Data:              n.cloneDataLocked(),
-	})
+	}
+
+	if err := n.persistenceManager.SaveSnapshot(snapshot); err != nil {
+		return err
+	}
+
+	n.lastIncludedIndex = snapshot.LastIncludedIndex
+	n.lastIncludedTerm = snapshot.LastIncludedTerm
+	n.compactLogUpToLocked(snapshot.LastIncludedIndex)
+
+	return nil
 }
 
 // maybeSaveSnapshotLocked decide se salvare uno snapshot locale.
-//
-// Lo snapshot viene creato solo quando lastApplied è multiplo della soglia
-// configurata. Nei test si può usare SNAPSHOT_THRESHOLD=1 per forzare la
-// creazione immediata dello snapshot.
 func (n *ConsensusNode) maybeSaveSnapshotLocked() {
 	if n.lastApplied == 0 || n.snapshotThreshold == 0 {
 		return
@@ -87,12 +90,6 @@ func (n *ConsensusNode) maybeSaveSnapshotLocked() {
 }
 
 // loadPersistentState carica lo stato persistente del nodo all'avvio.
-//
-// L'ordine è:
-//  1. carica state.json oppure fallback dall'ultimo record WAL valido;
-//  2. carica uno snapshot locale se più recente;
-//  3. applica eventuali entry committed non ancora applicate;
-//  4. se necessario, risalva lo stato compatto.
 func (n *ConsensusNode) loadPersistentState() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -130,37 +127,40 @@ func (n *ConsensusNode) loadPersistentState() error {
 	return nil
 }
 
-// restoreSnapshotIfNewerLocked applica lo snapshot solo se è più recente.
-//
-// Questo evita di sovrascrivere una state machine già più aggiornata caricata
-// da state.json o dal WAL.
+// restoreSnapshotIfNewerLocked applica uno snapshot solo se è più recente.
 func (n *ConsensusNode) restoreSnapshotIfNewerLocked(snapshot persistence.Snapshot) bool {
 	if snapshot.Data == nil {
 		return false
 	}
 
-	if snapshot.LastIncludedIndex <= n.lastApplied {
+	if snapshot.LastIncludedIndex <= n.lastIncludedIndex {
 		return false
 	}
 
 	n.store.Restore(snapshot.Data)
-	n.lastApplied = snapshot.LastIncludedIndex
+
+	n.lastIncludedIndex = snapshot.LastIncludedIndex
+	n.lastIncludedTerm = snapshot.LastIncludedTerm
+
+	if snapshot.LastIncludedIndex > n.lastApplied {
+		n.lastApplied = snapshot.LastIncludedIndex
+	}
 
 	if snapshot.LastIncludedIndex > n.commitIndex {
 		n.commitIndex = snapshot.LastIncludedIndex
 	}
 
+	n.compactLogUpToLocked(snapshot.LastIncludedIndex)
+
 	return true
 }
 
 // restorePersistentStateLocked ripristina i campi persistenti del nodo.
-//
-// Ripristina currentTerm, votedFor, log, commitIndex, lastApplied e la state
-// machine. Se lo stato non contiene ancora Data, ricostruisce la mappa
-// applicando le entry committed presenti nel log.
 func (n *ConsensusNode) restorePersistentStateLocked(state persistence.State) {
 	n.currentTerm = state.CurrentTerm
 	n.votedFor = state.VotedFor
+	n.lastIncludedIndex = state.LastIncludedIndex
+	n.lastIncludedTerm = state.LastIncludedTerm
 
 	if state.Log == nil {
 		n.log = make([]*consensuspb.LogEntry, 0)
@@ -168,17 +168,29 @@ func (n *ConsensusNode) restorePersistentStateLocked(state persistence.State) {
 		n.log = state.Log
 	}
 
+	n.compactLogUpToLocked(n.lastIncludedIndex)
+
 	n.commitIndex = state.CommitIndex
 	if n.commitIndex > n.lastLogIndexLocked() {
 		n.commitIndex = n.lastLogIndexLocked()
 	}
 
+	if n.commitIndex < n.lastIncludedIndex {
+		n.commitIndex = n.lastIncludedIndex
+	}
+
 	if state.Data != nil {
 		n.store.Restore(state.Data)
 		n.lastApplied = state.LastApplied
+
 		if n.lastApplied > n.commitIndex {
 			n.lastApplied = n.commitIndex
 		}
+
+		if n.lastApplied < n.lastIncludedIndex {
+			n.lastApplied = n.lastIncludedIndex
+		}
+
 		return
 	}
 
@@ -186,20 +198,13 @@ func (n *ConsensusNode) restorePersistentStateLocked(state persistence.State) {
 }
 
 // rebuildStateMachineFromCommittedLogLocked ricostruisce la state machine.
-//
-// Svuota lo store e riapplica solo le entry committed, cioè quelle con indice
-// minore o uguale a commitIndex.
 func (n *ConsensusNode) rebuildStateMachineFromCommittedLogLocked() {
 	n.store.Reset()
-	n.lastApplied = 0
+	n.lastApplied = n.lastIncludedIndex
 	n.applyCommittedEntriesLocked()
 }
 
-// applyCommittedEntriesLocked applica alla state machine le entry committed
-// ma non ancora applicate.
-//
-// Il consenso decide quando un'entry è committed. Lo storage decide come
-// applicarla alla mappa key-value.
+// applyCommittedEntriesLocked applica alla state machine le entry committed.
 func (n *ConsensusNode) applyCommittedEntriesLocked() {
 	for n.lastApplied < n.commitIndex {
 		nextIndex := n.lastApplied + 1

@@ -113,8 +113,6 @@ func (c *NodeClient) Close() {
 
 	for address, conn := range c.conns {
 		if err := conn.Close(); err != nil {
-			// Non ritorniamo errore perché Close viene tipicamente chiamata in fase
-			// di shutdown. Il log verrà gestito più avanti dal main o dal Router se serve.
 			fmt.Printf("cannot close connection to consensus node %s: %v\n", address, err)
 		}
 	}
@@ -127,9 +125,6 @@ func (c *NodeClient) Close() {
 //
 // Se esiste già una connessione, viene riutilizzata.
 // Se non esiste, viene creata e salvata nella cache interna.
-//
-// Il metodo è privato perché il resto del Proxy deve usare solo operazioni
-// semantiche come Put, Get, Delete e GetLeader.
 func (c *NodeClient) clientForAddress(address string) (kvpb.KeyValueServiceClient, error) {
 	if address == "" {
 		return nil, fmt.Errorf("consensus node address cannot be empty")

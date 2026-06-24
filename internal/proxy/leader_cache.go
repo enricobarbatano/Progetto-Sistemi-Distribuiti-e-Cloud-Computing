@@ -8,7 +8,18 @@ package proxy
 
 import "sync"
 
-// LeaderCache mantiene l'indirizzo del leader attualmente conosciuto.
+// LeaderInfo rappresenta il leader noto al Proxy.
+//
+// Address è l'informazione necessaria per il routing.
+// ID e Term migliorano osservabilità e debug, perché permettono al Proxy di
+// restituire una risposta GetLeader più completa al client.
+type LeaderInfo struct {
+	ID      string
+	Address string
+	Term    uint64
+}
+
+// LeaderCache mantiene il leader attualmente conosciuto.
 //
 // gRPC gestisce le richieste in goroutine separate, quindi più client possono
 // arrivare contemporaneamente al Proxy. Per questo motivo l'accesso alla cache
@@ -17,8 +28,8 @@ import "sync"
 // Questa struct non contiene logica di discovery: conserva solo il risultato
 // più recente scoperto da altri componenti.
 type LeaderCache struct {
-	mu            sync.RWMutex
-	leaderAddress string
+	mu     sync.RWMutex
+	leader LeaderInfo
 }
 
 // NewLeaderCache crea una cache leader vuota.
@@ -29,34 +40,34 @@ func NewLeaderCache() *LeaderCache {
 	return &LeaderCache{}
 }
 
-// Get restituisce l'indirizzo del leader noto.
+// Get restituisce il leader noto.
 //
 // Il secondo valore di ritorno indica se il leader è presente.
 // Se non è ancora stato scoperto, found sarà false.
-func (c *LeaderCache) Get() (string, bool) {
+func (c *LeaderCache) Get() (LeaderInfo, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.leaderAddress == "" {
-		return "", false
+	if c.leader.Address == "" {
+		return LeaderInfo{}, false
 	}
 
-	return c.leaderAddress, true
+	return c.leader, true
 }
 
-// Set aggiorna l'indirizzo del leader noto.
+// Set aggiorna il leader noto.
 //
 // Se viene passato un indirizzo vuoto, la funzione non modifica la cache.
 // Questo evita di cancellare accidentalmente un leader valido con un hint vuoto.
-func (c *LeaderCache) Set(leaderAddress string) {
-	if leaderAddress == "" {
+func (c *LeaderCache) Set(leader LeaderInfo) {
+	if leader.Address == "" {
 		return
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.leaderAddress = leaderAddress
+	c.leader = leader
 }
 
 // Clear rimuove il leader attualmente noto.
@@ -67,13 +78,19 @@ func (c *LeaderCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.leaderAddress = ""
+	c.leader = LeaderInfo{}
 }
 
 // UpdateFromHint aggiorna la cache usando un leader_hint ricevuto da un follower.
 //
-// È semanticamente uguale a Set, ma mantiene più chiaro il punto del codice in
-// cui l'indirizzo arriva da una risposta del cluster.
+// Il leader_hint contiene solo l'indirizzo, quindi ID e Term vengono lasciati
+// vuoti. Alla successiva discovery completa verranno valorizzati di nuovo.
 func (c *LeaderCache) UpdateFromHint(leaderHint string) {
-	c.Set(leaderHint)
+	if leaderHint == "" {
+		return
+	}
+
+	c.Set(LeaderInfo{
+		Address: leaderHint,
+	})
 }

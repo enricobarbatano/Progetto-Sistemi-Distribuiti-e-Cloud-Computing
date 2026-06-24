@@ -10,9 +10,10 @@
 //   - heartbeat periodici;
 //   - riuso delle connessioni gRPC verso i peer;
 //   - tracking peer online/offline;
-//   - persistenza su state.json e WAL append-only;
-//   - recovery robusto da state.json e fallback dall'ultimo record WAL valido;
-//   - snapshot locale minimale della state machine;
+//   - persistenza su state.json e WAL event-based;
+//   - recovery robusto da state.json e fallback da replay WAL;
+//   - snapshot locale della state machine;
+//   - log compaction locale dopo snapshot;
 //   - ricostruzione della state machine applicando solo entry committed;
 //   - controllo di coerenza del log lato follower;
 //   - replicazione delle entry su quorum per Put e Delete;
@@ -55,6 +56,15 @@ type ConsensusNode struct {
 	commitIndex uint64
 	lastApplied uint64
 	role        consensuspb.NodeRole
+
+	// lastIncludedIndex e lastIncludedTerm rappresentano il prefisso del log
+	// già coperto dallo snapshot locale.
+	//
+	// Dopo la log compaction, il log fisico può non contenere più le entry
+	// iniziali. Questi due campi permettono comunque di validare prevLogIndex
+	// e prevLogTerm quando l'indice coincide con il bordo dello snapshot.
+	lastIncludedIndex uint64
+	lastIncludedTerm  uint64
 
 	nextIndex  map[string]uint64
 	matchIndex map[string]uint64
@@ -112,6 +122,9 @@ func NewConsensusNode(id string, address string, peers map[string]string, dataDi
 		commitIndex: 0,
 		lastApplied: 0,
 		role:        consensuspb.NodeRole_NODE_ROLE_FOLLOWER,
+
+		lastIncludedIndex: 0,
+		lastIncludedTerm:  0,
 
 		nextIndex:  make(map[string]uint64),
 		matchIndex: make(map[string]uint64),

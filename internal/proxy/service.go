@@ -64,7 +64,7 @@ func (s *ProxyService) Delete(ctx context.Context, req *kvpb.DeleteRequest) (*kv
 // Se il Router non ha ancora un leader in cache, esegue una discovery sui seed
 // nodes. Questa RPC è utile per debug e test manuali.
 func (s *ProxyService) GetLeader(ctx context.Context, req *kvpb.GetLeaderRequest) (*kvpb.GetLeaderResponse, error) {
-	leaderAddress, err := s.router.leaderOrDiscover(ctx)
+	leader, err := s.router.LeaderInfo(ctx)
 	if err != nil {
 		return &kvpb.GetLeaderResponse{
 			HasLeader: false,
@@ -73,6 +73,8 @@ func (s *ProxyService) GetLeader(ctx context.Context, req *kvpb.GetLeaderRequest
 
 	return &kvpb.GetLeaderResponse{
 		HasLeader:     true,
-		LeaderAddress: leaderAddress,
+		LeaderId:      leader.ID,
+		LeaderAddress: leader.Address,
+		Term:          leader.Term,
 	}, nil
 }
