@@ -1,10 +1,15 @@
 # Fase 5 - Replicazione Atomica dei Log
 
-Questo documento descrive la **Fase 5** del progetto, dedicata alla replicazione atomica dei log nel cluster di Consensus Node.
+Questo documento descrive la **Fase 5** del progetto, dedicata alla replicazione atomica dei log nel cluster di Consensus Node, e il successivo hardening di persistenza/recovery effettuato prima dello sviluppo del Client Proxy Service.
 
-Questa fase rappresenta il passaggio dal semplice meccanismo di elezione del leader a un sistema di storage replicato con conferma su quorum. Dopo questa fase, una scrittura non viene più applicata localmente in modo immediato e isolato, ma viene prima inserita nel log del leader, persistita, replicata sui follower e considerata completata solo dopo il raggiungimento della maggioranza dei nodi.
+La fase rappresenta il passaggio da un cluster capace di eleggere un leader a un sistema di storage replicato con conferma su quorum. Una scrittura non viene più applicata localmente in modo immediato e isolato, ma viene prima inserita nel log del leader, persistita, replicata sui follower e considerata completata solo dopo il raggiungimento della maggioranza dei nodi.
 
-L'obiettivo è avvicinare il comportamento del sistema a quello richiesto da Raft: un leader coordina le modifiche allo stato, i follower replicano il log, e la state machine key-value applica solo entry committed.
+In aggiunta, prima di procedere con il Proxy, sono stati introdotti:
+
+- recovery robusto della state machine dopo riavvio;
+- persistenza di `commitIndex`, `lastApplied` e `data`;
+- fallback dall'ultimo record valido del WAL;
+- snapshot locale minimale della mappa key-value.
 
 ---
 
@@ -15,7 +20,7 @@ Prima della Fase 5, il cluster era già in grado di:
 - eleggere un leader;
 - mantenere heartbeat periodici;
 - propagare il leader noto tramite `GetLeader`;
-- persistere lo stato su `state.json` e WAL append-only;
+- persistere `currentTerm`, `votedFor` e log su disco;
 - gestire connessioni gRPC persistenti verso i peer;
 - tracciare lo stato online/offline dei peer;
 - eseguire `Put` e `Delete` solo localmente sul leader, senza vera replica su quorum.
@@ -42,6 +47,7 @@ I file principali modificati in questa fase sono:
 ```text
 internal/consensus/node.go
 cmd/bench-client/main.go
+documents/Fase5-replicazioneAtomicaDeiLog.md
 ```
 
 ### `internal/consensus/node.go`
@@ -53,14 +59,14 @@ In questa fase sono state aggiunte le funzioni necessarie per:
 - selezionare le entry da replicare a partire da un certo indice;
 - replicare il log verso un singolo peer;
 - replicare una entry fino al raggiungimento del quorum;
-- gestire le scritture `Put` e `Delete` in modo comune;
-- forzare le letture `Get` solo sul leader.
+- gestire `Put` e `Delete` in modo comune;
+- forzare le letture `Get` solo sul leader;
+- ripristinare lo stato applicato dopo un riavvio;
+- salvare snapshot locali della state machine.
 
 ### `cmd/bench-client/main.go`
 
-È stato aggiornato per supportare test manuali più completi tramite variabili d'ambiente.
-
-Ora supporta:
+È stato aggiornato per supportare test manuali più completi tramite variabili d'ambiente:
 
 ```text
 OP=leader
@@ -70,13 +76,11 @@ OP=delete
 OP=all
 ```
 
-Questo ha permesso di testare direttamente scritture, letture, cancellazioni e redirect tramite `leader_hint`.
-
 ---
 
 ## 3. Modello di consistenza adottato
 
-In questa fase il sistema adotta una forma base di consistenza forte:
+Il sistema adotta una forma base di consistenza forte:
 
 - solo il leader accetta scritture;
 - solo il leader serve letture;
@@ -84,9 +88,7 @@ In questa fase il sistema adotta una forma base di consistenza forte:
 - una entry viene applicata alla mappa key-value solo dopo essere committed;
 - i follower rispondono alle richieste client con errore e `leader_hint`.
 
-Questa scelta evita che un client legga da un follower che potrebbe non aver ancora ricevuto l'ultimo `commitIndex`.
-
-In particolare, il comportamento scelto è:
+Il comportamento scelto è:
 
 ```text
 Put/Delete su leader   -> possibile successo dopo quorum
@@ -94,6 +96,8 @@ Put/Delete su follower -> rifiuto con leader_hint
 Get su leader          -> lettura dalla state machine locale
 Get su follower        -> rifiuto con leader_hint
 ```
+
+Questa scelta evita letture stale dai follower.
 
 ---
 
@@ -131,13 +135,11 @@ Subito dopo viene persistita tramite:
 n.persistLocked()
 ```
 
-Questa funzione scrive prima nel WAL append-only e poi aggiorna lo snapshot `state.json`.
-
 ---
 
 ## 5. Persistenza prima della replica
 
-Una proprietà importante della fase è che il leader persiste la entry prima di iniziare la replica.
+Il leader persiste la entry prima di iniziare la replica.
 
 Il flusso è:
 
@@ -149,9 +151,7 @@ Il flusso è:
 5. replica ai follower
 ```
 
-Questo evita che il leader perda una entry già presa in carico in caso di crash immediato dopo l'append locale.
-
-Il WAL resta ancora minimale: ogni record contiene uno snapshot dello stato persistente corrente. Tuttavia, il file è append-only e permette di tracciare l'evoluzione dello stato nel tempo.
+Questo riduce il rischio di perdere una entry già presa in carico in caso di crash immediato dopo l'append locale.
 
 ---
 
@@ -167,10 +167,6 @@ Restituisce tutte le entry del log a partire da un certo indice:
 func (n *ConsensusNode) entriesFromIndexLocked(index uint64) []*consensuspb.LogEntry
 ```
 
-Viene usata dal leader per preparare la lista di entry da inviare a un follower a partire da `nextIndex[peer]`.
-
----
-
 ### `logTermAtIndexLocked`
 
 Restituisce il termine della entry con un certo indice:
@@ -179,21 +175,13 @@ Restituisce il termine della entry con un certo indice:
 func (n *ConsensusNode) logTermAtIndexLocked(index uint64) (uint64, bool)
 ```
 
-Se l'indice è `0`, restituisce termine `0`, perché l'indice `0` rappresenta il punto prima dell'inizio del log.
-
----
-
 ### `hasLogEntryLocked`
 
-Verifica se il follower possiede una entry con indice e termine specifici:
+Verifica se il nodo possiede una entry con indice e termine specifici:
 
 ```go
 func (n *ConsensusNode) hasLogEntryLocked(index uint64, term uint64) bool
 ```
-
-Questa funzione implementa il controllo di coerenza di `AppendEntries`.
-
----
 
 ### `truncateLogFromIndexLocked`
 
@@ -203,27 +191,19 @@ Rimuove tutte le entry con indice maggiore o uguale a quello specificato:
 func (n *ConsensusNode) truncateLogFromIndexLocked(index uint64)
 ```
 
-Serve per gestire conflitti tra il log locale del follower e il log del leader.
-
----
-
 ### `appendEntriesFromLeaderLocked`
 
-Appende al follower le entry ricevute dal leader:
+Appende al follower le entry ricevute dal leader e gestisce eventuali conflitti:
 
 ```go
 func (n *ConsensusNode) appendEntriesFromLeaderLocked(entries []*consensuspb.LogEntry) bool
 ```
 
-Se trova una entry locale con stesso indice ma termine diverso, tronca il log e appende le entry del leader da quel punto.
-
 ---
 
 ## 7. AppendEntries lato follower
 
-La RPC `AppendEntries` è stata rafforzata.
-
-Ora il follower non accetta più entry alla cieca, ma segue questo flusso:
+La RPC `AppendEntries` segue questo flusso:
 
 ```text
 1. se req.Term < currentTerm, rifiuta;
@@ -235,7 +215,8 @@ Ora il follower non accetta più entry alla cieca, ma segue questo flusso:
 7. in caso di conflitto, tronca il log e riallinea;
 8. aggiorna commitIndex se leaderCommit è maggiore;
 9. applica le entry committed alla state machine;
-10. resetta il timer di elezione.
+10. persiste lo stato se è cambiato;
+11. resetta il timer di elezione.
 ```
 
 Il controllo principale è:
@@ -249,8 +230,6 @@ if !n.hasLogEntryLocked(req.PrevLogIndex, req.PrevLogTerm) {
     }, nil
 }
 ```
-
-Questo permette al leader di capire quando un follower è indietro o ha un log divergente.
 
 ---
 
@@ -276,20 +255,12 @@ matchIndex[peer] = ultima entry nota come replicata con successo su quel followe
 
 Durante la replica:
 
-- se `AppendEntries` ha successo, il leader aggiorna:
-
 ```go
 n.matchIndex[peerID] = resp.MatchIndex
 n.nextIndex[peerID] = resp.MatchIndex + 1
 ```
 
-- se `AppendEntries` fallisce per inconsistenza del log, il leader decrementa:
-
-```go
-n.nextIndex[peerID]--
-```
-
-Questo permette al leader di cercare progressivamente il punto di incontro con il log del follower.
+Se la replica fallisce per inconsistenza del log, il leader decrementa `nextIndex` e riprova.
 
 ---
 
@@ -316,8 +287,6 @@ Il flusso è:
 8. se il contesto scade o il nodo perde leadership, fallisce.
 ```
 
-Questa funzione è chiamata in parallelo per i vari peer.
-
 ---
 
 ## 10. Replica fino al quorum
@@ -336,23 +305,19 @@ Il leader conta sé stesso come primo nodo che possiede la entry:
 replicatedCount := 1
 ```
 
-Poi invia la replica ai peer e aspetta risposte positive.
-
 Con 3 nodi, la maggioranza è 2:
 
 ```text
 leader + 1 follower = quorum
 ```
 
-Se viene raggiunta la maggioranza, la funzione restituisce `true`.
-
-Se non viene raggiunta entro timeout, restituisce `false`.
+Se viene raggiunta la maggioranza, la funzione restituisce `true`. Altrimenti restituisce `false`.
 
 ---
 
 ## 11. Gestione comune di Put e Delete
 
-Per evitare duplicazione, `Put` e `Delete` usano una funzione comune:
+`Put` e `Delete` usano una funzione comune:
 
 ```go
 func (n *ConsensusNode) handleWriteOperation(ctx context.Context, operation consensuspb.LogOperation, key string, value string) (bool, string, string, error)
@@ -367,54 +332,13 @@ Questa funzione:
 5. replica la entry su quorum;
 6. se il quorum viene raggiunto, aggiorna `commitIndex`;
 7. applica la entry alla state machine;
-8. invia heartbeat per propagare il nuovo `commitIndex`;
-9. restituisce successo al client.
-
-Se il nodo non è leader, restituisce:
-
-```text
-success=false
-error=node is not leader
-leader_hint=<leader address>
-```
-
-Se non viene raggiunto il quorum, restituisce:
-
-```text
-success=false
-error=failed to replicate entry to quorum
-leader_hint=<leader address>
-```
+8. persiste di nuovo lo stato applicato;
+9. invia heartbeat per propagare il nuovo `commitIndex`;
+10. restituisce successo al client.
 
 ---
 
-## 12. Put
-
-La RPC `Put` ora chiama:
-
-```go
-n.handleWriteOperation(ctx, consensuspb.LogOperation_LOG_OPERATION_PUT, req.Key, req.Value)
-```
-
-Il leader risponde `success=true` solo se la entry è stata replicata su quorum e applicata localmente.
-
-Un follower rifiuta la richiesta e restituisce `leader_hint`.
-
----
-
-## 13. Delete
-
-La RPC `Delete` usa la stessa logica di `Put`, ma con operazione:
-
-```go
-consensuspb.LogOperation_LOG_OPERATION_DELETE
-```
-
-Anche `Delete` viene confermata solo dopo replica su quorum e apply locale.
-
----
-
-## 14. Get solo dal leader
+## 12. Get solo dal leader
 
 Per evitare letture stale dai follower, `Get` viene servita solo dal leader.
 
@@ -426,59 +350,147 @@ error=node is not leader
 leader_hint=<leader address>
 ```
 
-Se il leader riceve una `Get`, legge dalla propria state machine locale:
+Se il leader riceve una `Get`, legge dalla propria state machine locale.
+
+---
+
+## 13. Recovery robusto
+
+Dopo i primi test della Fase 5 è emerso un limite importante: il nodo persisteva il log, ma la mappa key-value in memoria poteva non essere ricostruita correttamente dopo un restart.
+
+Per risolvere il problema, `persistentState` è stato esteso con:
 
 ```go
-value, ok := n.data[req.Key]
+CommitIndex uint64            `json:"commit_index"`
+LastApplied uint64            `json:"last_applied"`
+Data        map[string]string `json:"data"`
 ```
 
-Questo approccio è più semplice di un meccanismo read-index, ma garantisce che le letture passino dal nodo che ha coordinato il commit.
+Anche `walRecord` è stato esteso con gli stessi campi.
 
----
+Ora `state.json` contiene:
 
-## 15. Aggiornamento del bench-client
+```json
+{
+  "current_term": 6,
+  "voted_for": "node-1",
+  "log": [
+    {
+      "index": 1,
+      "term": 3,
+      "operation": 1,
+      "key": "recovery-key",
+      "value": "recovery-value"
+    }
+  ],
+  "commit_index": 1,
+  "last_applied": 1,
+  "data": {
+    "recovery-key": "recovery-value"
+  }
+}
+```
 
-Il client di test `cmd/bench-client/main.go` è stato aggiornato per supportare:
+Il recovery segue questo ordine:
 
 ```text
-OP=leader
-OP=get
-OP=put
-OP=delete
-OP=all
+1. prova a caricare state.json;
+2. se state.json manca, prova a ricostruire dall'ultimo record valido del WAL;
+3. se esiste uno snapshot più recente, lo usa come base della data map;
+4. se mancano dati applicati, ricostruisce applicando solo entry committed;
+5. non applica entry non committed.
 ```
 
-Esempio `Put`:
+Il test di recovery ha confermato che, dopo stop e restart dei nodi senza cancellare `data/`, il nuovo leader legge ancora:
 
-```cmd
-set TARGET=localhost:50052
-set OP=put
-set KEY=name
-set VALUE=enrico
-go run .\cmd\bench-client
-```
-
-Esempio `Get`:
-
-```cmd
-set TARGET=localhost:50052
-set OP=get
-set KEY=name
-go run .\cmd\bench-client
-```
-
-Esempio `Delete`:
-
-```cmd
-set TARGET=localhost:50052
-set OP=delete
-set KEY=name
-go run .\cmd\bench-client
+```text
+Get response: found=true key=recovery-key value=recovery-value
 ```
 
 ---
 
-## 16. Test: Put sul leader
+## 14. Snapshot locale minimale
+
+Prima di passare al Client Proxy, è stato aggiunto uno snapshot locale minimale della state machine.
+
+Lo snapshot viene salvato in:
+
+```text
+data/node-X/node-X_snapshot.json
+```
+
+La struttura è:
+
+```go
+type snapshotState struct {
+    LastIncludedIndex uint64            `json:"last_included_index"`
+    LastIncludedTerm  uint64            `json:"last_included_term"`
+    Data              map[string]string `json:"data"`
+}
+```
+
+Esempio di snapshot generato:
+
+```json
+{
+  "last_included_index": 1,
+  "last_included_term": 1,
+  "data": {
+    "snapshot-key": "snapshot-value"
+  }
+}
+```
+
+Lo snapshot è atomico: viene scritto prima su file temporaneo e poi sostituito tramite rename.
+
+---
+
+## 15. Soglia snapshot configurabile
+
+La soglia snapshot predefinita è:
+
+```go
+const defaultSnapshotThreshold uint64 = 1000
+```
+
+Per test locali si può usare la variabile d'ambiente:
+
+```cmd
+set SNAPSHOT_THRESHOLD=1
+```
+
+In questo modo lo snapshot viene creato dopo la prima entry applicata.
+
+Questo evita di modificare il codice solo per testare il comportamento.
+
+---
+
+## 16. Caricamento snapshot all'avvio
+
+All'avvio, dopo aver caricato `state.json` o il fallback WAL, il nodo prova a caricare lo snapshot locale:
+
+```go
+func (n *ConsensusNode) loadSnapshotIfNewerLocked() error
+```
+
+Lo snapshot viene applicato solo se:
+
+```text
+snapshot.LastIncludedIndex > n.lastApplied
+```
+
+Questo evita di sovrascrivere uno stato più recente già presente in `state.json`.
+
+Per ora lo snapshot è un checkpoint locale della state machine. Non implementa ancora:
+
+- log compaction reale;
+- offset del log;
+- InstallSnapshot remoto leader -> follower;
+- invio snapshot a follower troppo indietro.
+
+---
+
+## 17. Test: Put sul leader
 
 Durante il test, il leader era:
 
@@ -502,13 +514,9 @@ Output:
 Put response: success=true key=name value=enrico error= leader_hint=
 ```
 
-Questo conferma che il leader ha accettato la scrittura, l'ha replicata su quorum, committata e applicata alla state machine.
-
 ---
 
-## 17. Test: Get sul leader dopo Put
-
-È stata poi eseguita una `Get` sul leader:
+## 18. Test: Get sul leader dopo Put
 
 ```cmd
 set TARGET=localhost:50052
@@ -523,13 +531,9 @@ Output:
 Get response: found=true key=name value=enrico error= leader_hint=localhost:50052
 ```
 
-Questo conferma che la entry è stata applicata correttamente alla mappa key-value del leader.
-
 ---
 
-## 18. Test: Get su follower
-
-Una `Get` verso un follower è stata rifiutata:
+## 19. Test: Get su follower
 
 ```cmd
 set TARGET=localhost:50051
@@ -544,13 +548,9 @@ Output:
 Get response: found=false key=name value= error=node is not leader leader_hint=localhost:50052
 ```
 
-Questo dimostra che i follower non servono letture potenzialmente stale.
-
 ---
 
-## 19. Test: Put su follower
-
-Una `Put` verso un follower è stata rifiutata:
+## 20. Test: Put su follower
 
 ```cmd
 set TARGET=localhost:50051
@@ -566,62 +566,24 @@ Output:
 Put response: success=false key=city value=roma error=node is not leader leader_hint=localhost:50052
 ```
 
-Il follower restituisce correttamente l'indirizzo del leader noto.
-
 ---
 
-## 20. Test: Put con un follower spento
+## 21. Test: Put con un follower spento
 
 Con un cluster a 3 nodi, è stato spento un follower. Il leader ha comunque accettato una scrittura perché leader + un follower raggiungibile formano ancora quorum.
-
-Comando:
-
-```cmd
-set TARGET=localhost:50052
-set OP=put
-set KEY=country
-set VALUE=italia
-go run .\cmd\bench-client
-```
 
 Output:
 
 ```text
 Put response: success=true key=country value=italia error= leader_hint=
-```
-
-Verifica successiva:
-
-```cmd
-set TARGET=localhost:50052
-set OP=get
-set KEY=country
-go run .\cmd\bench-client
-```
-
-Output:
-
-```text
 Get response: found=true key=country value=italia error= leader_hint=localhost:50052
 ```
 
-Questo conferma che il sistema resta disponibile alle scritture finché esiste una maggioranza.
-
 ---
 
-## 21. Test: Put senza quorum
+## 22. Test: Put senza quorum
 
 Quando il leader è rimasto senza maggioranza, una `Put` è stata rifiutata.
-
-Comando:
-
-```cmd
-set TARGET=localhost:50052
-set OP=put
-set KEY=fail-test
-set VALUE=no-quorum
-go run .\cmd\bench-client
-```
 
 Output:
 
@@ -629,11 +591,9 @@ Output:
 Put response: success=false key=fail-test value=no-quorum error=failed to replicate entry to quorum leader_hint=localhost:50052
 ```
 
-Questo è il comportamento corretto: il leader non conferma una scrittura se non riesce a replicarla su maggioranza.
-
 ---
 
-## 22. Test: Delete sul leader
+## 23. Test: Delete sul leader
 
 Dopo un reset pulito del cluster, il leader era:
 
@@ -641,50 +601,85 @@ Dopo un reset pulito del cluster, il leader era:
 node-3 -> localhost:50053
 ```
 
-Una `Put` verso un follower è stata rifiutata:
-
-```text
-Put response: success=false key=country value=italia error=node is not leader leader_hint=localhost:50053
-```
-
-La stessa `Put` verso il leader è riuscita:
+La `Put` verso il leader è riuscita:
 
 ```text
 Put response: success=true key=country value=italia error= leader_hint=
 ```
 
-La `Get` sul leader ha confermato il valore:
-
-```text
-Get response: found=true key=country value=italia error= leader_hint=localhost:50053
-```
-
-Poi è stata eseguita la `Delete`:
-
-```cmd
-set TARGET=localhost:50053
-set OP=delete
-set KEY=country
-go run .\cmd\bench-client
-```
-
-Output:
+La `Delete` è riuscita:
 
 ```text
 Delete response: success=true key=country error= leader_hint=
 ```
 
-Infine, la `Get` sul leader ha confermato la cancellazione:
+La `Get` successiva ha confermato la cancellazione:
 
 ```text
 Get response: found=false key=country value= error= leader_hint=localhost:50053
 ```
 
-Questo valida anche il ciclo completo di cancellazione replicata.
+---
+
+## 24. Test: recovery robusto
+
+È stata scritta la chiave:
+
+```text
+recovery-key = recovery-value
+```
+
+Dopo lo stop e restart dei tre nodi, senza cancellare `data/`, il nuovo leader ha restituito:
+
+```text
+Get response: found=true key=recovery-key value=recovery-value error= leader_hint=localhost:50051
+```
+
+Questo conferma che la state machine viene recuperata correttamente.
 
 ---
 
-## 23. Verifica tramite go test
+## 25. Test: snapshot locale minimale
+
+Per testare rapidamente lo snapshot è stata usata la soglia:
+
+```cmd
+set SNAPSHOT_THRESHOLD=1
+```
+
+Dopo una `Put`:
+
+```cmd
+set TARGET=localhost:50053
+set OP=put
+set KEY=snapshot-key
+set VALUE=snapshot-value
+go run .\cmd\bench-client
+```
+
+è stato generato lo snapshot su tutti e tre i nodi:
+
+```json
+{
+  "last_included_index": 1,
+  "last_included_term": 1,
+  "data": {
+    "snapshot-key": "snapshot-value"
+  }
+}
+```
+
+La `Get` sul leader ha confermato il valore:
+
+```text
+Get response: found=true key=snapshot-key value=snapshot-value error= leader_hint=localhost:50053
+```
+
+Questo conferma che lo snapshot locale viene generato correttamente dopo l'applicazione della entry committed.
+
+---
+
+## 26. Verifica tramite go test
 
 Dopo le modifiche è stato eseguito:
 
@@ -697,9 +692,7 @@ Il comando ha compilato correttamente tutti i package.
 
 ---
 
-## 24. Stato finale della Fase 5
-
-La Fase 5 base può essere considerata completata.
+## 27. Stato finale della Fase 5 e hardening 5.5
 
 Checklist:
 
@@ -720,37 +713,41 @@ Checklist:
 [OK] Scrittura con quorum disponibile riuscita
 [OK] Scrittura senza quorum fallita
 [OK] Delete replicata e applicata
+[OK] Persistenza di commitIndex, lastApplied e data
+[OK] Recovery robusto dopo restart
+[OK] Fallback dall'ultimo record WAL valido
+[OK] Snapshot locale minimale
+[OK] Soglia snapshot configurabile via SNAPSHOT_THRESHOLD
 [OK] go test ./... superato
 ```
 
 ---
 
-## 25. Limiti attuali
+## 28. Limiti attuali
 
-La Fase 5 implementa la replicazione base su quorum, ma rimangono alcuni limiti:
+La Fase 5 implementa la replicazione base su quorum e un primo hardening di recovery/snapshot, ma rimangono alcuni limiti:
 
 - il WAL è ancora snapshot-based e non event-based;
-- non esiste ancora replay completo del WAL in assenza di `state.json`;
-- non è ancora implementata la compattazione del log;
-- non sono ancora implementati snapshot reali;
-- `Get` è servita solo dal leader, senza read-index ottimizzato;
-- la gestione dei retry è semplice e decrementa `nextIndex` di uno alla volta;
-- non è ancora presente una suite di test automatici per scenari di crash e recovery;
+- lo snapshot è locale e non viene ancora inviato ai follower;
+- non esiste ancora log compaction reale;
+- `InstallSnapshot` è ancora uno stub logico;
+- `Get` è servita solo dal leader, senza ReadIndex;
+- la gestione dei retry decrementa `nextIndex` di uno alla volta;
+- non è ancora presente una suite automatica di crash/recovery;
 - la replica non è ancora ottimizzata con batching esplicito.
-
-Questi punti potranno essere affrontati nelle fasi successive.
 
 ---
 
-## 26. Prossimi obiettivi
+## 29. Prossimi obiettivi
 
 Le prossime attività consigliate sono:
 
 ```text
-1. aggiungere test automatici unit/integration per la replicazione;
-2. migliorare il WAL con record granulari;
-3. implementare replay WAL completo;
-4. aggiungere snapshot e log compaction;
-5. rafforzare il Client Proxy per seguire leader_hint automaticamente;
-6. testare scenari di crash/restart con dati persistenti.
+1. sviluppare il Client Proxy Service;
+2. rafforzare il proxy per seguire leader_hint automaticamente;
+3. aggiungere test automatici di crash leader e recovery;
+4. migliorare il WAL con record granulari event-based;
+5. implementare InstallSnapshot reale;
+6. introdurre log compaction;
+7. valutare ReadIndex per letture linearizzabili più efficienti.
 ```

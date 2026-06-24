@@ -11,12 +11,16 @@
 //   - riuso delle connessioni gRPC verso i peer;
 //   - tracking peer online/offline;
 //   - persistenza su state.json e WAL append-only;
+//   - recovery robusto da state.json e fallback dall'ultimo record WAL valido;
+//   - snapshot locale minimale della state machine;
+//   - ricostruzione della state machine applicando solo entry committed;
 //   - controllo di coerenza del log lato follower;
 //   - replicazione delle entry su quorum per Put e Delete;
 //   - letture Get servite solo dal leader per evitare letture stale.
 package consensus
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +29,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -35,10 +40,16 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+const defaultSnapshotThreshold uint64 = 1000
+
 type persistentState struct {
 	CurrentTerm uint64                  `json:"current_term"`
 	VotedFor    string                  `json:"voted_for"`
 	Log         []*consensuspb.LogEntry `json:"log"`
+
+	CommitIndex uint64            `json:"commit_index"`
+	LastApplied uint64            `json:"last_applied"`
+	Data        map[string]string `json:"data"`
 }
 
 type walRecord struct {
@@ -47,6 +58,16 @@ type walRecord struct {
 	CurrentTerm uint64                  `json:"current_term"`
 	VotedFor    string                  `json:"voted_for"`
 	Log         []*consensuspb.LogEntry `json:"log"`
+
+	CommitIndex uint64            `json:"commit_index"`
+	LastApplied uint64            `json:"last_applied"`
+	Data        map[string]string `json:"data"`
+}
+
+type snapshotState struct {
+	LastIncludedIndex uint64            `json:"last_included_index"`
+	LastIncludedTerm  uint64            `json:"last_included_term"`
+	Data              map[string]string `json:"data"`
 }
 
 type ConsensusNode struct {
@@ -72,8 +93,10 @@ type ConsensusNode struct {
 
 	data map[string]string
 
-	stateFile string
-	walFile   string
+	stateFile         string
+	walFile           string
+	snapshotFile      string
+	snapshotThreshold uint64
 
 	electionResetCh chan struct{}
 	stopCh          chan struct{}
@@ -120,8 +143,10 @@ func NewConsensusNode(id string, address string, peers map[string]string, dataDi
 
 		data: make(map[string]string),
 
-		stateFile: filepath.Join(dataDir, fmt.Sprintf("%s_state.json", id)),
-		walFile:   filepath.Join(dataDir, fmt.Sprintf("%s_wal.log", id)),
+		stateFile:         filepath.Join(dataDir, fmt.Sprintf("%s_state.json", id)),
+		walFile:           filepath.Join(dataDir, fmt.Sprintf("%s_wal.log", id)),
+		snapshotFile:      filepath.Join(dataDir, fmt.Sprintf("%s_snapshot.json", id)),
+		snapshotThreshold: readUint64Env("SNAPSHOT_THRESHOLD", defaultSnapshotThreshold),
 
 		electionResetCh: make(chan struct{}, 1),
 		stopCh:          make(chan struct{}),
@@ -145,6 +170,20 @@ func NewConsensusNode(id string, address string, peers map[string]string, dataDi
 	}
 
 	return node, nil
+}
+
+func readUint64Env(key string, defaultValue uint64) uint64 {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || parsed == 0 {
+		return defaultValue
+	}
+
+	return parsed
 }
 
 func (n *ConsensusNode) Start() {
@@ -192,6 +231,7 @@ func (n *ConsensusNode) markPeerOfflineLocked(peerID string, err error) {
 	if !exists || wasOnline {
 		log.Printf("node %s marked peer %s as offline: %v", n.id, peerID, err)
 	}
+
 	n.peerOnline[peerID] = false
 }
 
@@ -200,7 +240,26 @@ func (n *ConsensusNode) markPeerOnlineLocked(peerID string) {
 	if !exists || !wasOnline {
 		log.Printf("node %s marked peer %s as online", n.id, peerID)
 	}
+
 	n.peerOnline[peerID] = true
+}
+
+func (n *ConsensusNode) cloneDataLocked() map[string]string {
+	copyData := make(map[string]string, len(n.data))
+	for key, value := range n.data {
+		copyData[key] = value
+	}
+
+	return copyData
+}
+
+func cloneData(data map[string]string) map[string]string {
+	copyData := make(map[string]string, len(data))
+	for key, value := range data {
+		copyData[key] = value
+	}
+
+	return copyData
 }
 
 func (n *ConsensusNode) appendWALLocked() error {
@@ -210,6 +269,9 @@ func (n *ConsensusNode) appendWALLocked() error {
 		CurrentTerm: n.currentTerm,
 		VotedFor:    n.votedFor,
 		Log:         n.log,
+		CommitIndex: n.commitIndex,
+		LastApplied: n.lastApplied,
+		Data:        n.cloneDataLocked(),
 	}
 
 	file, err := os.OpenFile(n.walFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -235,6 +297,9 @@ func (n *ConsensusNode) persistLocked() error {
 		CurrentTerm: n.currentTerm,
 		VotedFor:    n.votedFor,
 		Log:         n.log,
+		CommitIndex: n.commitIndex,
+		LastApplied: n.lastApplied,
+		Data:        n.cloneDataLocked(),
 	}
 
 	content, err := json.MarshalIndent(state, "", "  ")
@@ -254,32 +319,217 @@ func (n *ConsensusNode) persistLocked() error {
 	return nil
 }
 
+func (n *ConsensusNode) saveSnapshotLocked() error {
+	if n.lastApplied == 0 {
+		return nil
+	}
+
+	lastIncludedTerm, _ := n.logTermAtIndexLocked(n.lastApplied)
+	snapshot := snapshotState{
+		LastIncludedIndex: n.lastApplied,
+		LastIncludedTerm:  lastIncludedTerm,
+		Data:              n.cloneDataLocked(),
+	}
+
+	content, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return fmt.Errorf("cannot marshal snapshot: %w", err)
+	}
+
+	tmpFile := n.snapshotFile + ".tmp"
+	if err := os.WriteFile(tmpFile, content, 0644); err != nil {
+		return fmt.Errorf("cannot write temporary snapshot file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, n.snapshotFile); err != nil {
+		return fmt.Errorf("cannot replace snapshot file: %w", err)
+	}
+
+	return nil
+}
+
+func (n *ConsensusNode) maybeSaveSnapshotLocked() {
+	if n.lastApplied == 0 || n.snapshotThreshold == 0 {
+		return
+	}
+
+	if n.lastApplied%n.snapshotThreshold != 0 {
+		return
+	}
+
+	if err := n.saveSnapshotLocked(); err != nil {
+		log.Printf("node %s cannot save snapshot: %v", n.id, err)
+	}
+}
+
 func (n *ConsensusNode) loadPersistentState() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	content, err := os.ReadFile(n.stateFile)
+	state, err := n.readStateFileLocked()
 	if err != nil {
 		if os.IsNotExist(err) {
+			walState, walErr := n.readLatestStateFromWALLocked()
+			if walErr != nil {
+				if os.IsNotExist(walErr) {
+					if err := n.loadSnapshotIfNewerLocked(); err != nil {
+						return err
+					}
+
+					return n.persistLocked()
+				}
+
+				return walErr
+			}
+
+			n.restorePersistentStateLocked(walState)
+			if err := n.loadSnapshotIfNewerLocked(); err != nil {
+				return err
+			}
+
+			if n.commitIndex > n.lastApplied {
+				n.applyCommittedEntriesLocked()
+			}
+
 			return n.persistLocked()
 		}
-		return fmt.Errorf("cannot read persistent state: %w", err)
+
+		return err
+	}
+
+	n.restorePersistentStateLocked(state)
+	if err := n.loadSnapshotIfNewerLocked(); err != nil {
+		return err
+	}
+
+	if n.commitIndex > n.lastApplied {
+		n.applyCommittedEntriesLocked()
+	}
+
+	return nil
+}
+
+func (n *ConsensusNode) readStateFileLocked() (*persistentState, error) {
+	content, err := os.ReadFile(n.stateFile)
+	if err != nil {
+		return nil, err
 	}
 
 	var state persistentState
 	if err := json.Unmarshal(content, &state); err != nil {
-		return fmt.Errorf("cannot unmarshal persistent state: %w", err)
+		return nil, fmt.Errorf("cannot unmarshal persistent state: %w", err)
 	}
 
+	return &state, nil
+}
+
+func (n *ConsensusNode) readLatestStateFromWALLocked() (*persistentState, error) {
+	file, err := os.Open(n.walFile)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var latest *persistentState
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 10*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var record walRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			continue
+		}
+
+		latest = &persistentState{
+			CurrentTerm: record.CurrentTerm,
+			VotedFor:    record.VotedFor,
+			Log:         record.Log,
+			CommitIndex: record.CommitIndex,
+			LastApplied: record.LastApplied,
+			Data:        record.Data,
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("cannot scan wal file: %w", err)
+	}
+
+	if latest == nil {
+		return nil, os.ErrNotExist
+	}
+
+	return latest, nil
+}
+
+func (n *ConsensusNode) loadSnapshotIfNewerLocked() error {
+	content, err := os.ReadFile(n.snapshotFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+
+		return fmt.Errorf("cannot read snapshot file: %w", err)
+	}
+
+	var snapshot snapshotState
+	if err := json.Unmarshal(content, &snapshot); err != nil {
+		return fmt.Errorf("cannot unmarshal snapshot: %w", err)
+	}
+
+	if snapshot.Data == nil {
+		return nil
+	}
+
+	if snapshot.LastIncludedIndex <= n.lastApplied {
+		return nil
+	}
+
+	n.data = cloneData(snapshot.Data)
+	n.lastApplied = snapshot.LastIncludedIndex
+
+	if snapshot.LastIncludedIndex > n.commitIndex {
+		n.commitIndex = snapshot.LastIncludedIndex
+	}
+
+	return nil
+}
+
+func (n *ConsensusNode) restorePersistentStateLocked(state *persistentState) {
 	n.currentTerm = state.CurrentTerm
 	n.votedFor = state.VotedFor
+
 	if state.Log == nil {
 		n.log = make([]*consensuspb.LogEntry, 0)
 	} else {
 		n.log = state.Log
 	}
 
-	return nil
+	n.commitIndex = state.CommitIndex
+	if n.commitIndex > n.lastLogIndexLocked() {
+		n.commitIndex = n.lastLogIndexLocked()
+	}
+
+	if state.Data != nil {
+		n.data = cloneData(state.Data)
+		n.lastApplied = state.LastApplied
+		if n.lastApplied > n.commitIndex {
+			n.lastApplied = n.commitIndex
+		}
+		return
+	}
+
+	n.rebuildStateMachineFromCommittedLogLocked()
+}
+
+func (n *ConsensusNode) rebuildStateMachineFromCommittedLogLocked() {
+	n.data = make(map[string]string)
+	n.lastApplied = 0
+	n.applyCommittedEntriesLocked()
 }
 
 func (n *ConsensusNode) applyCommittedEntriesLocked() {
@@ -293,16 +543,21 @@ func (n *ConsensusNode) applyCommittedEntriesLocked() {
 		switch entry.Operation {
 		case consensuspb.LogOperation_LOG_OPERATION_PUT:
 			n.data[entry.Key] = entry.Value
+
 		case consensuspb.LogOperation_LOG_OPERATION_DELETE:
 			delete(n.data, entry.Key)
+
 		case consensuspb.LogOperation_LOG_OPERATION_NOOP:
 			// NOOP non modifica la macchina a stati.
+
 		default:
 			// Operazioni non riconosciute vengono ignorate in questa fase.
 		}
 
 		n.lastApplied = nextIndex
 	}
+
+	n.maybeSaveSnapshotLocked()
 }
 
 func (n *ConsensusNode) entryByIndexLocked(index uint64) *consensuspb.LogEntry {
@@ -311,6 +566,7 @@ func (n *ConsensusNode) entryByIndexLocked(index uint64) *consensuspb.LogEntry {
 			return entry
 		}
 	}
+
 	return nil
 }
 
@@ -318,6 +574,7 @@ func (n *ConsensusNode) lastLogIndexLocked() uint64 {
 	if len(n.log) == 0 {
 		return 0
 	}
+
 	return n.log[len(n.log)-1].Index
 }
 
@@ -325,6 +582,7 @@ func (n *ConsensusNode) lastLogTermLocked() uint64 {
 	if len(n.log) == 0 {
 		return 0
 	}
+
 	return n.log[len(n.log)-1].Term
 }
 
@@ -332,11 +590,13 @@ func (n *ConsensusNode) logTermAtIndexLocked(index uint64) (uint64, bool) {
 	if index == 0 {
 		return 0, true
 	}
+
 	for _, entry := range n.log {
 		if entry.Index == index {
 			return entry.Term, true
 		}
 	}
+
 	return 0, false
 }
 
@@ -345,6 +605,7 @@ func (n *ConsensusNode) hasLogEntryLocked(index uint64, term uint64) bool {
 	if !ok {
 		return false
 	}
+
 	return localTerm == term
 }
 
@@ -355,6 +616,7 @@ func (n *ConsensusNode) truncateLogFromIndexLocked(index uint64) {
 			truncated = append(truncated, entry)
 		}
 	}
+
 	n.log = truncated
 
 	if n.commitIndex >= index {
@@ -364,8 +626,9 @@ func (n *ConsensusNode) truncateLogFromIndexLocked(index uint64) {
 			n.commitIndex = index - 1
 		}
 	}
+
 	if n.lastApplied > n.commitIndex {
-		n.lastApplied = n.commitIndex
+		n.rebuildStateMachineFromCommittedLogLocked()
 	}
 }
 
@@ -380,12 +643,14 @@ func (n *ConsensusNode) appendEntriesFromLeaderLocked(entries []*consensuspb.Log
 			n.log = append(n.log, entries[i:]...)
 			return true
 		}
+
 		if localEntry.Term != incomingEntry.Term {
 			n.truncateLogFromIndexLocked(incomingEntry.Index)
 			n.log = append(n.log, entries[i:]...)
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -396,15 +661,18 @@ func (n *ConsensusNode) entriesFromIndexLocked(index uint64) []*consensuspb.LogE
 			entries = append(entries, entry)
 		}
 	}
+
 	return entries
 }
 
 func (n *ConsensusNode) isCandidateLogUpToDateLocked(candidateLastLogIndex uint64, candidateLastLogTerm uint64) bool {
 	localLastLogTerm := n.lastLogTermLocked()
 	localLastLogIndex := n.lastLogIndexLocked()
+
 	if candidateLastLogTerm != localLastLogTerm {
 		return candidateLastLogTerm > localLastLogTerm
 	}
+
 	return candidateLastLogIndex >= localLastLogIndex
 }
 
@@ -417,6 +685,7 @@ func randomElectionTimeout() time.Duration {
 	minTimeout := 1500
 	maxTimeout := 3000
 	randomMillis := minTimeout + rand.Intn(maxTimeout-minTimeout+1)
+
 	return time.Duration(randomMillis) * time.Millisecond
 }
 
@@ -435,6 +704,7 @@ func (n *ConsensusNode) electionLoop() {
 		select {
 		case <-n.stopCh:
 			return
+
 		case <-n.electionResetCh:
 			if !timer.Stop() {
 				select {
@@ -442,14 +712,18 @@ func (n *ConsensusNode) electionLoop() {
 				default:
 				}
 			}
+
 			timer.Reset(randomElectionTimeout())
+
 		case <-timer.C:
 			n.mu.Lock()
 			isLeader := n.role == consensuspb.NodeRole_NODE_ROLE_LEADER
 			n.mu.Unlock()
+
 			if !isLeader {
 				n.startElection()
 			}
+
 			timer.Reset(randomElectionTimeout())
 		}
 	}
@@ -524,6 +798,7 @@ func (n *ConsensusNode) startElection() {
 
 			n.mu.Lock()
 			defer n.mu.Unlock()
+
 			n.markPeerOnlineLocked(peerID)
 
 			if n.role != consensuspb.NodeRole_NODE_ROLE_CANDIDATE || n.currentTerm != termStarted {
@@ -536,15 +811,18 @@ func (n *ConsensusNode) startElection() {
 				n.role = consensuspb.NodeRole_NODE_ROLE_FOLLOWER
 				n.leaderID = ""
 				n.leaderAddress = ""
+
 				if err := n.persistLocked(); err != nil {
 					log.Printf("node %s cannot persist higher term: %v", n.id, err)
 				}
+
 				n.resetElectionTimer()
 				return
 			}
 
 			if resp.VoteGranted {
 				votes++
+
 				if votes >= neededVotes && n.role == consensuspb.NodeRole_NODE_ROLE_CANDIDATE {
 					n.becomeLeaderLocked()
 					go n.sendHeartbeats()
@@ -577,10 +855,12 @@ func (n *ConsensusNode) heartbeatLoop() {
 		select {
 		case <-n.stopCh:
 			return
+
 		case <-ticker.C:
 			n.mu.Lock()
 			isLeader := n.role == consensuspb.NodeRole_NODE_ROLE_LEADER
 			n.mu.Unlock()
+
 			if isLeader {
 				n.sendHeartbeats()
 			}
@@ -590,9 +870,11 @@ func (n *ConsensusNode) heartbeatLoop() {
 
 func (n *ConsensusNode) sendHeartbeats() {
 	n.mu.Lock()
+
 	term := n.currentTerm
 	leaderID := n.id
 	leaderCommit := n.commitIndex
+
 	peers := make(map[string]string, len(n.peers))
 	for peerID, peerAddress := range n.peers {
 		peers[peerID] = peerAddress
@@ -605,19 +887,23 @@ func (n *ConsensusNode) sendHeartbeats() {
 			defer cancel()
 
 			n.mu.Lock()
+
 			nextIndex := n.nextIndex[peerID]
 			if nextIndex == 0 {
 				nextIndex = n.lastLogIndexLocked() + 1
 				n.nextIndex[peerID] = nextIndex
 			}
+
 			prevLogIndex := nextIndex - 1
 			prevLogTerm, _ := n.logTermAtIndexLocked(prevLogIndex)
+
 			client, err := n.getPeerClientLocked(peerID, peerAddress)
 			if err != nil {
 				n.markPeerOfflineLocked(peerID, err)
 				n.mu.Unlock()
 				return
 			}
+
 			n.mu.Unlock()
 
 			resp, err := client.AppendEntries(ctx, &consensuspb.AppendEntriesRequest{
@@ -637,6 +923,7 @@ func (n *ConsensusNode) sendHeartbeats() {
 
 			n.mu.Lock()
 			defer n.mu.Unlock()
+
 			n.markPeerOnlineLocked(peerID)
 
 			if resp.Term > n.currentTerm {
@@ -645,9 +932,11 @@ func (n *ConsensusNode) sendHeartbeats() {
 				n.role = consensuspb.NodeRole_NODE_ROLE_FOLLOWER
 				n.leaderID = ""
 				n.leaderAddress = ""
+
 				if err := n.persistLocked(); err != nil {
 					log.Printf("node %s cannot persist higher term from heartbeat response: %v", n.id, err)
 				}
+
 				n.resetElectionTimer()
 			}
 		}(peerID, peerAddress)
@@ -659,10 +948,12 @@ func (n *ConsensusNode) replicateLogToPeer(ctx context.Context, peerID string, p
 		select {
 		case <-ctx.Done():
 			return false
+
 		default:
 		}
 
 		n.mu.Lock()
+
 		if n.role != consensuspb.NodeRole_NODE_ROLE_LEADER {
 			n.mu.Unlock()
 			return false
@@ -687,6 +978,7 @@ func (n *ConsensusNode) replicateLogToPeer(ctx context.Context, peerID string, p
 			n.mu.Unlock()
 			return false
 		}
+
 		n.mu.Unlock()
 
 		resp, err := client.AppendEntries(ctx, &consensuspb.AppendEntriesRequest{
@@ -705,6 +997,7 @@ func (n *ConsensusNode) replicateLogToPeer(ctx context.Context, peerID string, p
 		}
 
 		n.mu.Lock()
+
 		n.markPeerOnlineLocked(peerID)
 
 		if resp.Term > n.currentTerm {
@@ -713,9 +1006,11 @@ func (n *ConsensusNode) replicateLogToPeer(ctx context.Context, peerID string, p
 			n.role = consensuspb.NodeRole_NODE_ROLE_FOLLOWER
 			n.leaderID = ""
 			n.leaderAddress = ""
+
 			if err := n.persistLocked(); err != nil {
 				log.Printf("node %s cannot persist higher term during replication: %v", n.id, err)
 			}
+
 			n.resetElectionTimer()
 			n.mu.Unlock()
 			return false
@@ -726,6 +1021,7 @@ func (n *ConsensusNode) replicateLogToPeer(ctx context.Context, peerID string, p
 			n.nextIndex[peerID] = resp.MatchIndex + 1
 			replicated := resp.MatchIndex >= targetIndex
 			n.mu.Unlock()
+
 			return replicated
 		}
 
@@ -734,12 +1030,14 @@ func (n *ConsensusNode) replicateLogToPeer(ctx context.Context, peerID string, p
 		} else {
 			n.nextIndex[peerID] = 1
 		}
+
 		n.mu.Unlock()
 	}
 }
 
 func (n *ConsensusNode) replicateEntryToQuorum(ctx context.Context, entryIndex uint64) bool {
 	n.mu.Lock()
+
 	neededVotes := n.majority()
 	if neededVotes <= 1 {
 		n.mu.Unlock()
@@ -750,6 +1048,7 @@ func (n *ConsensusNode) replicateEntryToQuorum(ctx context.Context, entryIndex u
 	for peerID, peerAddress := range n.peers {
 		peers[peerID] = peerAddress
 	}
+
 	n.mu.Unlock()
 
 	replicationCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -775,6 +1074,7 @@ func (n *ConsensusNode) replicateEntryToQuorum(ctx context.Context, entryIndex u
 					return true
 				}
 			}
+
 		case <-replicationCtx.Done():
 			return false
 		}
@@ -785,6 +1085,7 @@ func (n *ConsensusNode) replicateEntryToQuorum(ctx context.Context, entryIndex u
 
 func (n *ConsensusNode) handleWriteOperation(ctx context.Context, operation consensuspb.LogOperation, key string, value string) (bool, string, string, error) {
 	n.mu.Lock()
+
 	if n.role != consensuspb.NodeRole_NODE_ROLE_LEADER {
 		leaderHint := n.leaderAddress
 		n.mu.Unlock()
@@ -800,30 +1101,41 @@ func (n *ConsensusNode) handleWriteOperation(ctx context.Context, operation cons
 	}
 
 	n.log = append(n.log, entry)
+
 	if err := n.persistLocked(); err != nil {
 		n.mu.Unlock()
 		return false, "", "", err
 	}
+
 	n.mu.Unlock()
 
 	if !n.replicateEntryToQuorum(ctx, entry.Index) {
 		n.mu.Lock()
 		leaderHint := n.leaderAddress
 		n.mu.Unlock()
+
 		return false, "failed to replicate entry to quorum", leaderHint, nil
 	}
 
 	n.mu.Lock()
+
 	if n.role != consensuspb.NodeRole_NODE_ROLE_LEADER || entry.Term != n.currentTerm {
 		leaderHint := n.leaderAddress
 		n.mu.Unlock()
+
 		return false, "leadership changed before commit", leaderHint, nil
 	}
 
 	if entry.Index > n.commitIndex {
 		n.commitIndex = entry.Index
 		n.applyCommittedEntriesLocked()
+
+		if err := n.persistLocked(); err != nil {
+			n.mu.Unlock()
+			return false, "", "", err
+		}
 	}
+
 	n.mu.Unlock()
 
 	go n.sendHeartbeats()
@@ -836,7 +1148,10 @@ func (n *ConsensusNode) RequestVote(ctx context.Context, req *consensuspb.Reques
 	defer n.mu.Unlock()
 
 	if req.Term < n.currentTerm {
-		return &consensuspb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: false}, nil
+		return &consensuspb.RequestVoteResponse{
+			Term:        n.currentTerm,
+			VoteGranted: false,
+		}, nil
 	}
 
 	stateChanged := false
@@ -869,7 +1184,10 @@ func (n *ConsensusNode) RequestVote(ctx context.Context, req *consensuspb.Reques
 		n.resetElectionTimer()
 	}
 
-	return &consensuspb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: voteGranted}, nil
+	return &consensuspb.RequestVoteResponse{
+		Term:        n.currentTerm,
+		VoteGranted: voteGranted,
+	}, nil
 }
 
 func (n *ConsensusNode) AppendEntries(ctx context.Context, req *consensuspb.AppendEntriesRequest) (*consensuspb.AppendEntriesResponse, error) {
@@ -877,10 +1195,15 @@ func (n *ConsensusNode) AppendEntries(ctx context.Context, req *consensuspb.Appe
 	defer n.mu.Unlock()
 
 	if req.Term < n.currentTerm {
-		return &consensuspb.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: n.lastLogIndexLocked()}, nil
+		return &consensuspb.AppendEntriesResponse{
+			Term:       n.currentTerm,
+			Success:    false,
+			MatchIndex: n.lastLogIndexLocked(),
+		}, nil
 	}
 
 	stateChanged := false
+
 	if req.Term > n.currentTerm {
 		n.currentTerm = req.Term
 		n.votedFor = ""
@@ -889,6 +1212,7 @@ func (n *ConsensusNode) AppendEntries(ctx context.Context, req *consensuspb.Appe
 
 	n.role = consensuspb.NodeRole_NODE_ROLE_FOLLOWER
 	n.leaderID = req.LeaderId
+
 	if leaderAddress, ok := n.peers[req.LeaderId]; ok {
 		n.leaderAddress = leaderAddress
 	} else if req.LeaderId == n.id {
@@ -901,11 +1225,30 @@ func (n *ConsensusNode) AppendEntries(ctx context.Context, req *consensuspb.Appe
 				return nil, err
 			}
 		}
+
 		n.resetElectionTimer()
-		return &consensuspb.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: n.lastLogIndexLocked()}, nil
+
+		return &consensuspb.AppendEntriesResponse{
+			Term:       n.currentTerm,
+			Success:    false,
+			MatchIndex: n.lastLogIndexLocked(),
+		}, nil
 	}
 
 	if n.appendEntriesFromLeaderLocked(req.Entries) {
+		stateChanged = true
+	}
+
+	if req.LeaderCommit > n.commitIndex {
+		lastIndex := n.lastLogIndexLocked()
+
+		if req.LeaderCommit < lastIndex {
+			n.commitIndex = req.LeaderCommit
+		} else {
+			n.commitIndex = lastIndex
+		}
+
+		n.applyCommittedEntriesLocked()
 		stateChanged = true
 	}
 
@@ -915,18 +1258,13 @@ func (n *ConsensusNode) AppendEntries(ctx context.Context, req *consensuspb.Appe
 		}
 	}
 
-	if req.LeaderCommit > n.commitIndex {
-		lastIndex := n.lastLogIndexLocked()
-		if req.LeaderCommit < lastIndex {
-			n.commitIndex = req.LeaderCommit
-		} else {
-			n.commitIndex = lastIndex
-		}
-		n.applyCommittedEntriesLocked()
-	}
-
 	n.resetElectionTimer()
-	return &consensuspb.AppendEntriesResponse{Term: n.currentTerm, Success: true, MatchIndex: n.lastLogIndexLocked()}, nil
+
+	return &consensuspb.AppendEntriesResponse{
+		Term:       n.currentTerm,
+		Success:    true,
+		MatchIndex: n.lastLogIndexLocked(),
+	}, nil
 }
 
 func (n *ConsensusNode) InstallSnapshot(ctx context.Context, req *consensuspb.InstallSnapshotRequest) (*consensuspb.InstallSnapshotResponse, error) {
@@ -934,7 +1272,10 @@ func (n *ConsensusNode) InstallSnapshot(ctx context.Context, req *consensuspb.In
 	defer n.mu.Unlock()
 
 	if req.Term < n.currentTerm {
-		return &consensuspb.InstallSnapshotResponse{Term: n.currentTerm, Success: false}, nil
+		return &consensuspb.InstallSnapshotResponse{
+			Term:    n.currentTerm,
+			Success: false,
+		}, nil
 	}
 
 	if req.Term > n.currentTerm {
@@ -942,25 +1283,40 @@ func (n *ConsensusNode) InstallSnapshot(ctx context.Context, req *consensuspb.In
 		n.votedFor = ""
 		n.role = consensuspb.NodeRole_NODE_ROLE_FOLLOWER
 		n.leaderID = req.LeaderId
+
 		if leaderAddress, ok := n.peers[req.LeaderId]; ok {
 			n.leaderAddress = leaderAddress
 		}
+
 		if err := n.persistLocked(); err != nil {
 			return nil, err
 		}
 	}
 
 	n.resetElectionTimer()
-	return &consensuspb.InstallSnapshotResponse{Term: n.currentTerm, Success: true}, nil
+
+	return &consensuspb.InstallSnapshotResponse{
+		Term:    n.currentTerm,
+		Success: true,
+	}, nil
 }
 
 func (n *ConsensusNode) Put(ctx context.Context, req *kvpb.PutRequest) (*kvpb.PutResponse, error) {
-	success, errorMessage, leaderHint, err := n.handleWriteOperation(ctx, consensuspb.LogOperation_LOG_OPERATION_PUT, req.Key, req.Value)
+	success, errorMessage, leaderHint, err := n.handleWriteOperation(
+		ctx,
+		consensuspb.LogOperation_LOG_OPERATION_PUT,
+		req.Key,
+		req.Value,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	return &kvpb.PutResponse{Success: success, Error: errorMessage, LeaderHint: leaderHint}, nil
+	return &kvpb.PutResponse{
+		Success:    success,
+		Error:      errorMessage,
+		LeaderHint: leaderHint,
+	}, nil
 }
 
 func (n *ConsensusNode) Get(ctx context.Context, req *kvpb.GetRequest) (*kvpb.GetResponse, error) {
@@ -968,24 +1324,44 @@ func (n *ConsensusNode) Get(ctx context.Context, req *kvpb.GetRequest) (*kvpb.Ge
 	defer n.mu.Unlock()
 
 	if n.role != consensuspb.NodeRole_NODE_ROLE_LEADER {
-		return &kvpb.GetResponse{Found: false, Error: "node is not leader", LeaderHint: n.leaderAddress}, nil
+		return &kvpb.GetResponse{
+			Found:      false,
+			Error:      "node is not leader",
+			LeaderHint: n.leaderAddress,
+		}, nil
 	}
 
 	value, ok := n.data[req.Key]
 	if !ok {
-		return &kvpb.GetResponse{Found: false, LeaderHint: n.leaderAddress}, nil
+		return &kvpb.GetResponse{
+			Found:      false,
+			LeaderHint: n.leaderAddress,
+		}, nil
 	}
 
-	return &kvpb.GetResponse{Found: true, Value: value, LeaderHint: n.leaderAddress}, nil
+	return &kvpb.GetResponse{
+		Found:      true,
+		Value:      value,
+		LeaderHint: n.leaderAddress,
+	}, nil
 }
 
 func (n *ConsensusNode) Delete(ctx context.Context, req *kvpb.DeleteRequest) (*kvpb.DeleteResponse, error) {
-	success, errorMessage, leaderHint, err := n.handleWriteOperation(ctx, consensuspb.LogOperation_LOG_OPERATION_DELETE, req.Key, "")
+	success, errorMessage, leaderHint, err := n.handleWriteOperation(
+		ctx,
+		consensuspb.LogOperation_LOG_OPERATION_DELETE,
+		req.Key,
+		"",
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	return &kvpb.DeleteResponse{Success: success, Error: errorMessage, LeaderHint: leaderHint}, nil
+	return &kvpb.DeleteResponse{
+		Success:    success,
+		Error:      errorMessage,
+		LeaderHint: leaderHint,
+	}, nil
 }
 
 func (n *ConsensusNode) GetLeader(ctx context.Context, req *kvpb.GetLeaderRequest) (*kvpb.GetLeaderResponse, error) {
@@ -993,12 +1369,25 @@ func (n *ConsensusNode) GetLeader(ctx context.Context, req *kvpb.GetLeaderReques
 	defer n.mu.Unlock()
 
 	if n.role == consensuspb.NodeRole_NODE_ROLE_LEADER {
-		return &kvpb.GetLeaderResponse{HasLeader: true, LeaderId: n.id, LeaderAddress: n.address, Term: n.currentTerm}, nil
+		return &kvpb.GetLeaderResponse{
+			HasLeader:     true,
+			LeaderId:      n.id,
+			LeaderAddress: n.address,
+			Term:          n.currentTerm,
+		}, nil
 	}
 
 	if n.leaderID != "" {
-		return &kvpb.GetLeaderResponse{HasLeader: true, LeaderId: n.leaderID, LeaderAddress: n.leaderAddress, Term: n.currentTerm}, nil
+		return &kvpb.GetLeaderResponse{
+			HasLeader:     true,
+			LeaderId:      n.leaderID,
+			LeaderAddress: n.leaderAddress,
+			Term:          n.currentTerm,
+		}, nil
 	}
 
-	return &kvpb.GetLeaderResponse{HasLeader: false, Term: n.currentTerm}, nil
+	return &kvpb.GetLeaderResponse{
+		HasLeader: false,
+		Term:      n.currentTerm,
+	}, nil
 }
