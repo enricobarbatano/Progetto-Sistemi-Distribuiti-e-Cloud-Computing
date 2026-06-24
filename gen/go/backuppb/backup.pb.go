@@ -21,7 +21,7 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Richiesta per avviare uno snapshot.
+// Richiesta per forzare la creazione di uno snapshot su un Consensus Node.
 type TriggerSnapshotRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RequesterId   string                 `protobuf:"bytes,1,opt,name=requester_id,json=requesterId,proto3" json:"requester_id,omitempty"`
@@ -66,14 +66,17 @@ func (x *TriggerSnapshotRequest) GetRequesterId() string {
 	return ""
 }
 
-// Risposta alla richiesta di snapshot.
+// Risposta alla richiesta di snapshot su un Consensus Node.
 type TriggerSnapshotResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	SnapshotId    string                 `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
-	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Accepted          bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	NodeId            string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	SnapshotId        string                 `protobuf:"bytes,3,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	LastIncludedIndex uint64                 `protobuf:"varint,4,opt,name=last_included_index,json=lastIncludedIndex,proto3" json:"last_included_index,omitempty"`
+	LastIncludedTerm  uint64                 `protobuf:"varint,5,opt,name=last_included_term,json=lastIncludedTerm,proto3" json:"last_included_term,omitempty"`
+	Error             string                 `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *TriggerSnapshotResponse) Reset() {
@@ -113,11 +116,32 @@ func (x *TriggerSnapshotResponse) GetAccepted() bool {
 	return false
 }
 
+func (x *TriggerSnapshotResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
 func (x *TriggerSnapshotResponse) GetSnapshotId() string {
 	if x != nil {
 		return x.SnapshotId
 	}
 	return ""
+}
+
+func (x *TriggerSnapshotResponse) GetLastIncludedIndex() uint64 {
+	if x != nil {
+		return x.LastIncludedIndex
+	}
+	return 0
+}
+
+func (x *TriggerSnapshotResponse) GetLastIncludedTerm() uint64 {
+	if x != nil {
+		return x.LastIncludedTerm
+	}
+	return 0
 }
 
 func (x *TriggerSnapshotResponse) GetError() string {
@@ -127,10 +151,12 @@ func (x *TriggerSnapshotResponse) GetError() string {
 	return ""
 }
 
-// Richiesta per scaricare uno snapshot.
+// Richiesta per scaricare lo snapshot locale di un Consensus Node.
 type DownloadSnapshotRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SnapshotId    string                 `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	RequesterId string                 `protobuf:"bytes,1,opt,name=requester_id,json=requesterId,proto3" json:"requester_id,omitempty"`
+	// Se vuoto, il nodo restituisce l'ultimo snapshot disponibile.
+	SnapshotId    string `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -165,6 +191,13 @@ func (*DownloadSnapshotRequest) Descriptor() ([]byte, []int) {
 	return file_proto_backup_proto_rawDescGZIP(), []int{2}
 }
 
+func (x *DownloadSnapshotRequest) GetRequesterId() string {
+	if x != nil {
+		return x.RequesterId
+	}
+	return ""
+}
+
 func (x *DownloadSnapshotRequest) GetSnapshotId() string {
 	if x != nil {
 		return x.SnapshotId
@@ -172,15 +205,16 @@ func (x *DownloadSnapshotRequest) GetSnapshotId() string {
 	return ""
 }
 
-// Risposta con i dati dello snapshot.
+// Risposta con i dati dello snapshot locale del nodo.
 type DownloadSnapshotResponse struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	Success           bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
-	SnapshotId        string                 `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
-	SnapshotData      []byte                 `protobuf:"bytes,3,opt,name=snapshot_data,json=snapshotData,proto3" json:"snapshot_data,omitempty"`
-	LastIncludedIndex uint64                 `protobuf:"varint,4,opt,name=last_included_index,json=lastIncludedIndex,proto3" json:"last_included_index,omitempty"`
-	LastIncludedTerm  uint64                 `protobuf:"varint,5,opt,name=last_included_term,json=lastIncludedTerm,proto3" json:"last_included_term,omitempty"`
-	Error             string                 `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
+	NodeId            string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	SnapshotId        string                 `protobuf:"bytes,3,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	SnapshotData      []byte                 `protobuf:"bytes,4,opt,name=snapshot_data,json=snapshotData,proto3" json:"snapshot_data,omitempty"`
+	LastIncludedIndex uint64                 `protobuf:"varint,5,opt,name=last_included_index,json=lastIncludedIndex,proto3" json:"last_included_index,omitempty"`
+	LastIncludedTerm  uint64                 `protobuf:"varint,6,opt,name=last_included_term,json=lastIncludedTerm,proto3" json:"last_included_term,omitempty"`
+	Error             string                 `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -222,6 +256,13 @@ func (x *DownloadSnapshotResponse) GetSuccess() bool {
 	return false
 }
 
+func (x *DownloadSnapshotResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
 func (x *DownloadSnapshotResponse) GetSnapshotId() string {
 	if x != nil {
 		return x.SnapshotId
@@ -257,11 +298,12 @@ func (x *DownloadSnapshotResponse) GetError() string {
 	return ""
 }
 
-// Richiesta per compattare il log.
+// Richiesta per compattare il log locale di un Consensus Node.
 type CompactLogRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	SnapshotId    string                 `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
-	UpToIndex     uint64                 `protobuf:"varint,2,opt,name=up_to_index,json=upToIndex,proto3" json:"up_to_index,omitempty"`
+	RequesterId   string                 `protobuf:"bytes,1,opt,name=requester_id,json=requesterId,proto3" json:"requester_id,omitempty"`
+	SnapshotId    string                 `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	UpToIndex     uint64                 `protobuf:"varint,3,opt,name=up_to_index,json=upToIndex,proto3" json:"up_to_index,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -296,6 +338,13 @@ func (*CompactLogRequest) Descriptor() ([]byte, []int) {
 	return file_proto_backup_proto_rawDescGZIP(), []int{4}
 }
 
+func (x *CompactLogRequest) GetRequesterId() string {
+	if x != nil {
+		return x.RequesterId
+	}
+	return ""
+}
+
 func (x *CompactLogRequest) GetSnapshotId() string {
 	if x != nil {
 		return x.SnapshotId
@@ -314,8 +363,9 @@ func (x *CompactLogRequest) GetUpToIndex() uint64 {
 type CompactLogResponse struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	Success          bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
-	CompactedEntries uint64                 `protobuf:"varint,2,opt,name=compacted_entries,json=compactedEntries,proto3" json:"compacted_entries,omitempty"`
-	Error            string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	NodeId           string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	CompactedEntries uint64                 `protobuf:"varint,3,opt,name=compacted_entries,json=compactedEntries,proto3" json:"compacted_entries,omitempty"`
+	Error            string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -357,6 +407,13 @@ func (x *CompactLogResponse) GetSuccess() bool {
 	return false
 }
 
+func (x *CompactLogResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
 func (x *CompactLogResponse) GetCompactedEntries() uint64 {
 	if x != nil {
 		return x.CompactedEntries
@@ -365,6 +422,139 @@ func (x *CompactLogResponse) GetCompactedEntries() uint64 {
 }
 
 func (x *CompactLogResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// Richiesta per avviare un ciclo di backup coordinato.
+type TriggerBackupRequest struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	RequesterId string                 `protobuf:"bytes,1,opt,name=requester_id,json=requesterId,proto3" json:"requester_id,omitempty"`
+	// Se true, il Backup Service chiede prima ai nodi di creare uno snapshot.
+	ForceSnapshot bool `protobuf:"varint,2,opt,name=force_snapshot,json=forceSnapshot,proto3" json:"force_snapshot,omitempty"`
+	// Se true, dopo aver scaricato correttamente gli snapshot, il Backup Service
+	// invia CompactLog ai nodi.
+	CompactAfterDownload bool `protobuf:"varint,3,opt,name=compact_after_download,json=compactAfterDownload,proto3" json:"compact_after_download,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *TriggerBackupRequest) Reset() {
+	*x = TriggerBackupRequest{}
+	mi := &file_proto_backup_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TriggerBackupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TriggerBackupRequest) ProtoMessage() {}
+
+func (x *TriggerBackupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_backup_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TriggerBackupRequest.ProtoReflect.Descriptor instead.
+func (*TriggerBackupRequest) Descriptor() ([]byte, []int) {
+	return file_proto_backup_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *TriggerBackupRequest) GetRequesterId() string {
+	if x != nil {
+		return x.RequesterId
+	}
+	return ""
+}
+
+func (x *TriggerBackupRequest) GetForceSnapshot() bool {
+	if x != nil {
+		return x.ForceSnapshot
+	}
+	return false
+}
+
+func (x *TriggerBackupRequest) GetCompactAfterDownload() bool {
+	if x != nil {
+		return x.CompactAfterDownload
+	}
+	return false
+}
+
+// Risposta al ciclo di backup coordinato.
+type TriggerBackupResponse struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Accepted            bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	BackupId            string                 `protobuf:"bytes,2,opt,name=backup_id,json=backupId,proto3" json:"backup_id,omitempty"`
+	DownloadedSnapshots uint64                 `protobuf:"varint,3,opt,name=downloaded_snapshots,json=downloadedSnapshots,proto3" json:"downloaded_snapshots,omitempty"`
+	Error               string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *TriggerBackupResponse) Reset() {
+	*x = TriggerBackupResponse{}
+	mi := &file_proto_backup_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TriggerBackupResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TriggerBackupResponse) ProtoMessage() {}
+
+func (x *TriggerBackupResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_backup_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TriggerBackupResponse.ProtoReflect.Descriptor instead.
+func (*TriggerBackupResponse) Descriptor() ([]byte, []int) {
+	return file_proto_backup_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *TriggerBackupResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *TriggerBackupResponse) GetBackupId() string {
+	if x != nil {
+		return x.BackupId
+	}
+	return ""
+}
+
+func (x *TriggerBackupResponse) GetDownloadedSnapshots() uint64 {
+	if x != nil {
+		return x.DownloadedSnapshots
+	}
+	return 0
+}
+
+func (x *TriggerBackupResponse) GetError() string {
 	if x != nil {
 		return x.Error
 	}
@@ -380,7 +570,7 @@ type GetBackupStatusRequest struct {
 
 func (x *GetBackupStatusRequest) Reset() {
 	*x = GetBackupStatusRequest{}
-	mi := &file_proto_backup_proto_msgTypes[6]
+	mi := &file_proto_backup_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -392,7 +582,7 @@ func (x *GetBackupStatusRequest) String() string {
 func (*GetBackupStatusRequest) ProtoMessage() {}
 
 func (x *GetBackupStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_backup_proto_msgTypes[6]
+	mi := &file_proto_backup_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -405,23 +595,26 @@ func (x *GetBackupStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBackupStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetBackupStatusRequest) Descriptor() ([]byte, []int) {
-	return file_proto_backup_proto_rawDescGZIP(), []int{6}
+	return file_proto_backup_proto_rawDescGZIP(), []int{8}
 }
 
 // Risposta stato backup.
 type GetBackupStatusResponse struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	ServiceId        string                 `protobuf:"bytes,1,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
-	CreatedSnapshots uint64                 `protobuf:"varint,2,opt,name=created_snapshots,json=createdSnapshots,proto3" json:"created_snapshots,omitempty"`
-	LastSnapshotId   string                 `protobuf:"bytes,3,opt,name=last_snapshot_id,json=lastSnapshotId,proto3" json:"last_snapshot_id,omitempty"`
-	Status           string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	ServiceId           string                 `protobuf:"bytes,1,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
+	Status              string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	CreatedBackups      uint64                 `protobuf:"varint,3,opt,name=created_backups,json=createdBackups,proto3" json:"created_backups,omitempty"`
+	DownloadedSnapshots uint64                 `protobuf:"varint,4,opt,name=downloaded_snapshots,json=downloadedSnapshots,proto3" json:"downloaded_snapshots,omitempty"`
+	LastBackupId        string                 `protobuf:"bytes,5,opt,name=last_backup_id,json=lastBackupId,proto3" json:"last_backup_id,omitempty"`
+	LastSnapshotId      string                 `protobuf:"bytes,6,opt,name=last_snapshot_id,json=lastSnapshotId,proto3" json:"last_snapshot_id,omitempty"`
+	LastError           string                 `protobuf:"bytes,7,opt,name=last_error,json=lastError,proto3" json:"last_error,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *GetBackupStatusResponse) Reset() {
 	*x = GetBackupStatusResponse{}
-	mi := &file_proto_backup_proto_msgTypes[7]
+	mi := &file_proto_backup_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -433,7 +626,7 @@ func (x *GetBackupStatusResponse) String() string {
 func (*GetBackupStatusResponse) ProtoMessage() {}
 
 func (x *GetBackupStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_backup_proto_msgTypes[7]
+	mi := &file_proto_backup_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -446,26 +639,12 @@ func (x *GetBackupStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBackupStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetBackupStatusResponse) Descriptor() ([]byte, []int) {
-	return file_proto_backup_proto_rawDescGZIP(), []int{7}
+	return file_proto_backup_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetBackupStatusResponse) GetServiceId() string {
 	if x != nil {
 		return x.ServiceId
-	}
-	return ""
-}
-
-func (x *GetBackupStatusResponse) GetCreatedSnapshots() uint64 {
-	if x != nil {
-		return x.CreatedSnapshots
-	}
-	return 0
-}
-
-func (x *GetBackupStatusResponse) GetLastSnapshotId() string {
-	if x != nil {
-		return x.LastSnapshotId
 	}
 	return ""
 }
@@ -477,49 +656,106 @@ func (x *GetBackupStatusResponse) GetStatus() string {
 	return ""
 }
 
+func (x *GetBackupStatusResponse) GetCreatedBackups() uint64 {
+	if x != nil {
+		return x.CreatedBackups
+	}
+	return 0
+}
+
+func (x *GetBackupStatusResponse) GetDownloadedSnapshots() uint64 {
+	if x != nil {
+		return x.DownloadedSnapshots
+	}
+	return 0
+}
+
+func (x *GetBackupStatusResponse) GetLastBackupId() string {
+	if x != nil {
+		return x.LastBackupId
+	}
+	return ""
+}
+
+func (x *GetBackupStatusResponse) GetLastSnapshotId() string {
+	if x != nil {
+		return x.LastSnapshotId
+	}
+	return ""
+}
+
+func (x *GetBackupStatusResponse) GetLastError() string {
+	if x != nil {
+		return x.LastError
+	}
+	return ""
+}
+
 var File_proto_backup_proto protoreflect.FileDescriptor
 
 const file_proto_backup_proto_rawDesc = "" +
 	"\n" +
 	"\x12proto/backup.proto\x12\x06backup\";\n" +
 	"\x16TriggerSnapshotRequest\x12!\n" +
-	"\frequester_id\x18\x01 \x01(\tR\vrequesterId\"l\n" +
+	"\frequester_id\x18\x01 \x01(\tR\vrequesterId\"\xe3\x01\n" +
 	"\x17TriggerSnapshotResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1f\n" +
-	"\vsnapshot_id\x18\x02 \x01(\tR\n" +
-	"snapshotId\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\":\n" +
-	"\x17DownloadSnapshotRequest\x12\x1f\n" +
-	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
-	"snapshotId\"\xee\x01\n" +
-	"\x18DownloadSnapshotResponse\x12\x18\n" +
-	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x1f\n" +
-	"\vsnapshot_id\x18\x02 \x01(\tR\n" +
-	"snapshotId\x12#\n" +
-	"\rsnapshot_data\x18\x03 \x01(\fR\fsnapshotData\x12.\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x17\n" +
+	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12\x1f\n" +
+	"\vsnapshot_id\x18\x03 \x01(\tR\n" +
+	"snapshotId\x12.\n" +
 	"\x13last_included_index\x18\x04 \x01(\x04R\x11lastIncludedIndex\x12,\n" +
 	"\x12last_included_term\x18\x05 \x01(\x04R\x10lastIncludedTerm\x12\x14\n" +
-	"\x05error\x18\x06 \x01(\tR\x05error\"T\n" +
-	"\x11CompactLogRequest\x12\x1f\n" +
-	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
+	"\x05error\x18\x06 \x01(\tR\x05error\"]\n" +
+	"\x17DownloadSnapshotRequest\x12!\n" +
+	"\frequester_id\x18\x01 \x01(\tR\vrequesterId\x12\x1f\n" +
+	"\vsnapshot_id\x18\x02 \x01(\tR\n" +
+	"snapshotId\"\x87\x02\n" +
+	"\x18DownloadSnapshotResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x17\n" +
+	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12\x1f\n" +
+	"\vsnapshot_id\x18\x03 \x01(\tR\n" +
+	"snapshotId\x12#\n" +
+	"\rsnapshot_data\x18\x04 \x01(\fR\fsnapshotData\x12.\n" +
+	"\x13last_included_index\x18\x05 \x01(\x04R\x11lastIncludedIndex\x12,\n" +
+	"\x12last_included_term\x18\x06 \x01(\x04R\x10lastIncludedTerm\x12\x14\n" +
+	"\x05error\x18\a \x01(\tR\x05error\"w\n" +
+	"\x11CompactLogRequest\x12!\n" +
+	"\frequester_id\x18\x01 \x01(\tR\vrequesterId\x12\x1f\n" +
+	"\vsnapshot_id\x18\x02 \x01(\tR\n" +
 	"snapshotId\x12\x1e\n" +
-	"\vup_to_index\x18\x02 \x01(\x04R\tupToIndex\"q\n" +
+	"\vup_to_index\x18\x03 \x01(\x04R\tupToIndex\"\x8a\x01\n" +
 	"\x12CompactLogResponse\x12\x18\n" +
-	"\asuccess\x18\x01 \x01(\bR\asuccess\x12+\n" +
-	"\x11compacted_entries\x18\x02 \x01(\x04R\x10compactedEntries\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\"\x18\n" +
-	"\x16GetBackupStatusRequest\"\xa7\x01\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x17\n" +
+	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12+\n" +
+	"\x11compacted_entries\x18\x03 \x01(\x04R\x10compactedEntries\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"\x96\x01\n" +
+	"\x14TriggerBackupRequest\x12!\n" +
+	"\frequester_id\x18\x01 \x01(\tR\vrequesterId\x12%\n" +
+	"\x0eforce_snapshot\x18\x02 \x01(\bR\rforceSnapshot\x124\n" +
+	"\x16compact_after_download\x18\x03 \x01(\bR\x14compactAfterDownload\"\x99\x01\n" +
+	"\x15TriggerBackupResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1b\n" +
+	"\tbackup_id\x18\x02 \x01(\tR\bbackupId\x121\n" +
+	"\x14downloaded_snapshots\x18\x03 \x01(\x04R\x13downloadedSnapshots\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"\x18\n" +
+	"\x16GetBackupStatusRequest\"\x9b\x02\n" +
 	"\x17GetBackupStatusResponse\x12\x1d\n" +
 	"\n" +
-	"service_id\x18\x01 \x01(\tR\tserviceId\x12+\n" +
-	"\x11created_snapshots\x18\x02 \x01(\x04R\x10createdSnapshots\x12(\n" +
-	"\x10last_snapshot_id\x18\x03 \x01(\tR\x0elastSnapshotId\x12\x16\n" +
-	"\x06status\x18\x04 \x01(\tR\x06status2\xd3\x02\n" +
-	"\rBackupService\x12R\n" +
+	"service_id\x18\x01 \x01(\tR\tserviceId\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12'\n" +
+	"\x0fcreated_backups\x18\x03 \x01(\x04R\x0ecreatedBackups\x121\n" +
+	"\x14downloaded_snapshots\x18\x04 \x01(\x04R\x13downloadedSnapshots\x12$\n" +
+	"\x0elast_backup_id\x18\x05 \x01(\tR\flastBackupId\x12(\n" +
+	"\x10last_snapshot_id\x18\x06 \x01(\tR\x0elastSnapshotId\x12\x1d\n" +
+	"\n" +
+	"last_error\x18\a \x01(\tR\tlastError2\x83\x02\n" +
+	"\x11BackupNodeService\x12R\n" +
 	"\x0fTriggerSnapshot\x12\x1e.backup.TriggerSnapshotRequest\x1a\x1f.backup.TriggerSnapshotResponse\x12U\n" +
 	"\x10DownloadSnapshot\x12\x1f.backup.DownloadSnapshotRequest\x1a .backup.DownloadSnapshotResponse\x12C\n" +
 	"\n" +
-	"CompactLog\x12\x19.backup.CompactLogRequest\x1a\x1a.backup.CompactLogResponse\x12R\n" +
+	"CompactLog\x12\x19.backup.CompactLogRequest\x1a\x1a.backup.CompactLogResponse2\xb1\x01\n" +
+	"\rBackupService\x12L\n" +
+	"\rTriggerBackup\x12\x1c.backup.TriggerBackupRequest\x1a\x1d.backup.TriggerBackupResponse\x12R\n" +
 	"\x0fGetBackupStatus\x12\x1e.backup.GetBackupStatusRequest\x1a\x1f.backup.GetBackupStatusResponseBdZbgithub.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/backuppb;backuppbb\x06proto3"
 
 var (
@@ -534,7 +770,7 @@ func file_proto_backup_proto_rawDescGZIP() []byte {
 	return file_proto_backup_proto_rawDescData
 }
 
-var file_proto_backup_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_proto_backup_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_proto_backup_proto_goTypes = []any{
 	(*TriggerSnapshotRequest)(nil),   // 0: backup.TriggerSnapshotRequest
 	(*TriggerSnapshotResponse)(nil),  // 1: backup.TriggerSnapshotResponse
@@ -542,20 +778,24 @@ var file_proto_backup_proto_goTypes = []any{
 	(*DownloadSnapshotResponse)(nil), // 3: backup.DownloadSnapshotResponse
 	(*CompactLogRequest)(nil),        // 4: backup.CompactLogRequest
 	(*CompactLogResponse)(nil),       // 5: backup.CompactLogResponse
-	(*GetBackupStatusRequest)(nil),   // 6: backup.GetBackupStatusRequest
-	(*GetBackupStatusResponse)(nil),  // 7: backup.GetBackupStatusResponse
+	(*TriggerBackupRequest)(nil),     // 6: backup.TriggerBackupRequest
+	(*TriggerBackupResponse)(nil),    // 7: backup.TriggerBackupResponse
+	(*GetBackupStatusRequest)(nil),   // 8: backup.GetBackupStatusRequest
+	(*GetBackupStatusResponse)(nil),  // 9: backup.GetBackupStatusResponse
 }
 var file_proto_backup_proto_depIdxs = []int32{
-	0, // 0: backup.BackupService.TriggerSnapshot:input_type -> backup.TriggerSnapshotRequest
-	2, // 1: backup.BackupService.DownloadSnapshot:input_type -> backup.DownloadSnapshotRequest
-	4, // 2: backup.BackupService.CompactLog:input_type -> backup.CompactLogRequest
-	6, // 3: backup.BackupService.GetBackupStatus:input_type -> backup.GetBackupStatusRequest
-	1, // 4: backup.BackupService.TriggerSnapshot:output_type -> backup.TriggerSnapshotResponse
-	3, // 5: backup.BackupService.DownloadSnapshot:output_type -> backup.DownloadSnapshotResponse
-	5, // 6: backup.BackupService.CompactLog:output_type -> backup.CompactLogResponse
-	7, // 7: backup.BackupService.GetBackupStatus:output_type -> backup.GetBackupStatusResponse
-	4, // [4:8] is the sub-list for method output_type
-	0, // [0:4] is the sub-list for method input_type
+	0, // 0: backup.BackupNodeService.TriggerSnapshot:input_type -> backup.TriggerSnapshotRequest
+	2, // 1: backup.BackupNodeService.DownloadSnapshot:input_type -> backup.DownloadSnapshotRequest
+	4, // 2: backup.BackupNodeService.CompactLog:input_type -> backup.CompactLogRequest
+	6, // 3: backup.BackupService.TriggerBackup:input_type -> backup.TriggerBackupRequest
+	8, // 4: backup.BackupService.GetBackupStatus:input_type -> backup.GetBackupStatusRequest
+	1, // 5: backup.BackupNodeService.TriggerSnapshot:output_type -> backup.TriggerSnapshotResponse
+	3, // 6: backup.BackupNodeService.DownloadSnapshot:output_type -> backup.DownloadSnapshotResponse
+	5, // 7: backup.BackupNodeService.CompactLog:output_type -> backup.CompactLogResponse
+	7, // 8: backup.BackupService.TriggerBackup:output_type -> backup.TriggerBackupResponse
+	9, // 9: backup.BackupService.GetBackupStatus:output_type -> backup.GetBackupStatusResponse
+	5, // [5:10] is the sub-list for method output_type
+	0, // [0:5] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -572,9 +812,9 @@ func file_proto_backup_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_backup_proto_rawDesc), len(file_proto_backup_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   10,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_proto_backup_proto_goTypes,
 		DependencyIndexes: file_proto_backup_proto_depIdxs,

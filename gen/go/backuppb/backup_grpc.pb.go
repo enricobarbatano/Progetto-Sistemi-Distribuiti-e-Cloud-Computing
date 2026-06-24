@@ -19,25 +19,219 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	BackupService_TriggerSnapshot_FullMethodName  = "/backup.BackupService/TriggerSnapshot"
-	BackupService_DownloadSnapshot_FullMethodName = "/backup.BackupService/DownloadSnapshot"
-	BackupService_CompactLog_FullMethodName       = "/backup.BackupService/CompactLog"
-	BackupService_GetBackupStatus_FullMethodName  = "/backup.BackupService/GetBackupStatus"
+	BackupNodeService_TriggerSnapshot_FullMethodName  = "/backup.BackupNodeService/TriggerSnapshot"
+	BackupNodeService_DownloadSnapshot_FullMethodName = "/backup.BackupNodeService/DownloadSnapshot"
+	BackupNodeService_CompactLog_FullMethodName       = "/backup.BackupNodeService/CompactLog"
+)
+
+// BackupNodeServiceClient is the client API for BackupNodeService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// BackupNodeService espone le RPC che ogni Consensus Node rende disponibili
+// al Backup Service.
+//
+// Queste RPC non sono pensate per i client esterni: servono al Backup Service
+// per orchestrare snapshot, download e compattazione remota del log.
+type BackupNodeServiceClient interface {
+	// Forza il nodo a creare uno snapshot locale della state machine.
+	TriggerSnapshot(ctx context.Context, in *TriggerSnapshotRequest, opts ...grpc.CallOption) (*TriggerSnapshotResponse, error)
+	// Permette al Backup Service di scaricare lo snapshot locale del nodo.
+	DownloadSnapshot(ctx context.Context, in *DownloadSnapshotRequest, opts ...grpc.CallOption) (*DownloadSnapshotResponse, error)
+	// Richiede al nodo di compattare il log fino a un certo indice.
+	CompactLog(ctx context.Context, in *CompactLogRequest, opts ...grpc.CallOption) (*CompactLogResponse, error)
+}
+
+type backupNodeServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewBackupNodeServiceClient(cc grpc.ClientConnInterface) BackupNodeServiceClient {
+	return &backupNodeServiceClient{cc}
+}
+
+func (c *backupNodeServiceClient) TriggerSnapshot(ctx context.Context, in *TriggerSnapshotRequest, opts ...grpc.CallOption) (*TriggerSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TriggerSnapshotResponse)
+	err := c.cc.Invoke(ctx, BackupNodeService_TriggerSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *backupNodeServiceClient) DownloadSnapshot(ctx context.Context, in *DownloadSnapshotRequest, opts ...grpc.CallOption) (*DownloadSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DownloadSnapshotResponse)
+	err := c.cc.Invoke(ctx, BackupNodeService_DownloadSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *backupNodeServiceClient) CompactLog(ctx context.Context, in *CompactLogRequest, opts ...grpc.CallOption) (*CompactLogResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CompactLogResponse)
+	err := c.cc.Invoke(ctx, BackupNodeService_CompactLog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// BackupNodeServiceServer is the server API for BackupNodeService service.
+// All implementations must embed UnimplementedBackupNodeServiceServer
+// for forward compatibility.
+//
+// BackupNodeService espone le RPC che ogni Consensus Node rende disponibili
+// al Backup Service.
+//
+// Queste RPC non sono pensate per i client esterni: servono al Backup Service
+// per orchestrare snapshot, download e compattazione remota del log.
+type BackupNodeServiceServer interface {
+	// Forza il nodo a creare uno snapshot locale della state machine.
+	TriggerSnapshot(context.Context, *TriggerSnapshotRequest) (*TriggerSnapshotResponse, error)
+	// Permette al Backup Service di scaricare lo snapshot locale del nodo.
+	DownloadSnapshot(context.Context, *DownloadSnapshotRequest) (*DownloadSnapshotResponse, error)
+	// Richiede al nodo di compattare il log fino a un certo indice.
+	CompactLog(context.Context, *CompactLogRequest) (*CompactLogResponse, error)
+	mustEmbedUnimplementedBackupNodeServiceServer()
+}
+
+// UnimplementedBackupNodeServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedBackupNodeServiceServer struct{}
+
+func (UnimplementedBackupNodeServiceServer) TriggerSnapshot(context.Context, *TriggerSnapshotRequest) (*TriggerSnapshotResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TriggerSnapshot not implemented")
+}
+func (UnimplementedBackupNodeServiceServer) DownloadSnapshot(context.Context, *DownloadSnapshotRequest) (*DownloadSnapshotResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DownloadSnapshot not implemented")
+}
+func (UnimplementedBackupNodeServiceServer) CompactLog(context.Context, *CompactLogRequest) (*CompactLogResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CompactLog not implemented")
+}
+func (UnimplementedBackupNodeServiceServer) mustEmbedUnimplementedBackupNodeServiceServer() {}
+func (UnimplementedBackupNodeServiceServer) testEmbeddedByValue()                           {}
+
+// UnsafeBackupNodeServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to BackupNodeServiceServer will
+// result in compilation errors.
+type UnsafeBackupNodeServiceServer interface {
+	mustEmbedUnimplementedBackupNodeServiceServer()
+}
+
+func RegisterBackupNodeServiceServer(s grpc.ServiceRegistrar, srv BackupNodeServiceServer) {
+	// If the following call pancis, it indicates UnimplementedBackupNodeServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&BackupNodeService_ServiceDesc, srv)
+}
+
+func _BackupNodeService_TriggerSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TriggerSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BackupNodeServiceServer).TriggerSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BackupNodeService_TriggerSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BackupNodeServiceServer).TriggerSnapshot(ctx, req.(*TriggerSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BackupNodeService_DownloadSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DownloadSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BackupNodeServiceServer).DownloadSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BackupNodeService_DownloadSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BackupNodeServiceServer).DownloadSnapshot(ctx, req.(*DownloadSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BackupNodeService_CompactLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompactLogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BackupNodeServiceServer).CompactLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BackupNodeService_CompactLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BackupNodeServiceServer).CompactLog(ctx, req.(*CompactLogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// BackupNodeService_ServiceDesc is the grpc.ServiceDesc for BackupNodeService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var BackupNodeService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "backup.BackupNodeService",
+	HandlerType: (*BackupNodeServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "TriggerSnapshot",
+			Handler:    _BackupNodeService_TriggerSnapshot_Handler,
+		},
+		{
+			MethodName: "DownloadSnapshot",
+			Handler:    _BackupNodeService_DownloadSnapshot_Handler,
+		},
+		{
+			MethodName: "CompactLog",
+			Handler:    _BackupNodeService_CompactLog_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/backup.proto",
+}
+
+const (
+	BackupService_TriggerBackup_FullMethodName   = "/backup.BackupService/TriggerBackup"
+	BackupService_GetBackupStatus_FullMethodName = "/backup.BackupService/GetBackupStatus"
 )
 
 // BackupServiceClient is the client API for BackupService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// BackupService espone le operazioni usate dal servizio di snapshot e backup.
+// BackupService espone le RPC del servizio esterno di backup.
+//
+// Questo servizio è implementato dal componente backup-service.
+// Serve per avviare manualmente un ciclo di backup e per leggere lo stato
+// aggregato del servizio.
 type BackupServiceClient interface {
-	// Avvia la creazione di uno snapshot.
-	TriggerSnapshot(ctx context.Context, in *TriggerSnapshotRequest, opts ...grpc.CallOption) (*TriggerSnapshotResponse, error)
-	// Permette di scaricare uno snapshot già creato.
-	DownloadSnapshot(ctx context.Context, in *DownloadSnapshotRequest, opts ...grpc.CallOption) (*DownloadSnapshotResponse, error)
-	// Richiede la compattazione dei log fino a un certo indice.
-	CompactLog(ctx context.Context, in *CompactLogRequest, opts ...grpc.CallOption) (*CompactLogResponse, error)
-	// Restituisce informazioni sullo stato del servizio di backup.
+	// Avvia un ciclo di backup coordinato sui nodi configurati.
+	TriggerBackup(ctx context.Context, in *TriggerBackupRequest, opts ...grpc.CallOption) (*TriggerBackupResponse, error)
+	// Restituisce informazioni sullo stato del Backup Service.
 	GetBackupStatus(ctx context.Context, in *GetBackupStatusRequest, opts ...grpc.CallOption) (*GetBackupStatusResponse, error)
 }
 
@@ -49,30 +243,10 @@ func NewBackupServiceClient(cc grpc.ClientConnInterface) BackupServiceClient {
 	return &backupServiceClient{cc}
 }
 
-func (c *backupServiceClient) TriggerSnapshot(ctx context.Context, in *TriggerSnapshotRequest, opts ...grpc.CallOption) (*TriggerSnapshotResponse, error) {
+func (c *backupServiceClient) TriggerBackup(ctx context.Context, in *TriggerBackupRequest, opts ...grpc.CallOption) (*TriggerBackupResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(TriggerSnapshotResponse)
-	err := c.cc.Invoke(ctx, BackupService_TriggerSnapshot_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *backupServiceClient) DownloadSnapshot(ctx context.Context, in *DownloadSnapshotRequest, opts ...grpc.CallOption) (*DownloadSnapshotResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(DownloadSnapshotResponse)
-	err := c.cc.Invoke(ctx, BackupService_DownloadSnapshot_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *backupServiceClient) CompactLog(ctx context.Context, in *CompactLogRequest, opts ...grpc.CallOption) (*CompactLogResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(CompactLogResponse)
-	err := c.cc.Invoke(ctx, BackupService_CompactLog_FullMethodName, in, out, cOpts...)
+	out := new(TriggerBackupResponse)
+	err := c.cc.Invoke(ctx, BackupService_TriggerBackup_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -93,15 +267,15 @@ func (c *backupServiceClient) GetBackupStatus(ctx context.Context, in *GetBackup
 // All implementations must embed UnimplementedBackupServiceServer
 // for forward compatibility.
 //
-// BackupService espone le operazioni usate dal servizio di snapshot e backup.
+// BackupService espone le RPC del servizio esterno di backup.
+//
+// Questo servizio è implementato dal componente backup-service.
+// Serve per avviare manualmente un ciclo di backup e per leggere lo stato
+// aggregato del servizio.
 type BackupServiceServer interface {
-	// Avvia la creazione di uno snapshot.
-	TriggerSnapshot(context.Context, *TriggerSnapshotRequest) (*TriggerSnapshotResponse, error)
-	// Permette di scaricare uno snapshot già creato.
-	DownloadSnapshot(context.Context, *DownloadSnapshotRequest) (*DownloadSnapshotResponse, error)
-	// Richiede la compattazione dei log fino a un certo indice.
-	CompactLog(context.Context, *CompactLogRequest) (*CompactLogResponse, error)
-	// Restituisce informazioni sullo stato del servizio di backup.
+	// Avvia un ciclo di backup coordinato sui nodi configurati.
+	TriggerBackup(context.Context, *TriggerBackupRequest) (*TriggerBackupResponse, error)
+	// Restituisce informazioni sullo stato del Backup Service.
 	GetBackupStatus(context.Context, *GetBackupStatusRequest) (*GetBackupStatusResponse, error)
 	mustEmbedUnimplementedBackupServiceServer()
 }
@@ -113,14 +287,8 @@ type BackupServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedBackupServiceServer struct{}
 
-func (UnimplementedBackupServiceServer) TriggerSnapshot(context.Context, *TriggerSnapshotRequest) (*TriggerSnapshotResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method TriggerSnapshot not implemented")
-}
-func (UnimplementedBackupServiceServer) DownloadSnapshot(context.Context, *DownloadSnapshotRequest) (*DownloadSnapshotResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method DownloadSnapshot not implemented")
-}
-func (UnimplementedBackupServiceServer) CompactLog(context.Context, *CompactLogRequest) (*CompactLogResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method CompactLog not implemented")
+func (UnimplementedBackupServiceServer) TriggerBackup(context.Context, *TriggerBackupRequest) (*TriggerBackupResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TriggerBackup not implemented")
 }
 func (UnimplementedBackupServiceServer) GetBackupStatus(context.Context, *GetBackupStatusRequest) (*GetBackupStatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBackupStatus not implemented")
@@ -146,56 +314,20 @@ func RegisterBackupServiceServer(s grpc.ServiceRegistrar, srv BackupServiceServe
 	s.RegisterService(&BackupService_ServiceDesc, srv)
 }
 
-func _BackupService_TriggerSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(TriggerSnapshotRequest)
+func _BackupService_TriggerBackup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TriggerBackupRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(BackupServiceServer).TriggerSnapshot(ctx, in)
+		return srv.(BackupServiceServer).TriggerBackup(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: BackupService_TriggerSnapshot_FullMethodName,
+		FullMethod: BackupService_TriggerBackup_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BackupServiceServer).TriggerSnapshot(ctx, req.(*TriggerSnapshotRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _BackupService_DownloadSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DownloadSnapshotRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(BackupServiceServer).DownloadSnapshot(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: BackupService_DownloadSnapshot_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BackupServiceServer).DownloadSnapshot(ctx, req.(*DownloadSnapshotRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _BackupService_CompactLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CompactLogRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(BackupServiceServer).CompactLog(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: BackupService_CompactLog_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BackupServiceServer).CompactLog(ctx, req.(*CompactLogRequest))
+		return srv.(BackupServiceServer).TriggerBackup(ctx, req.(*TriggerBackupRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -226,16 +358,8 @@ var BackupService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*BackupServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "TriggerSnapshot",
-			Handler:    _BackupService_TriggerSnapshot_Handler,
-		},
-		{
-			MethodName: "DownloadSnapshot",
-			Handler:    _BackupService_DownloadSnapshot_Handler,
-		},
-		{
-			MethodName: "CompactLog",
-			Handler:    _BackupService_CompactLog_Handler,
+			MethodName: "TriggerBackup",
+			Handler:    _BackupService_TriggerBackup_Handler,
 		},
 		{
 			MethodName: "GetBackupStatus",

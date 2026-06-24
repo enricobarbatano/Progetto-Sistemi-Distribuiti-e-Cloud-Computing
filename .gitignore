@@ -63,3 +63,6 @@ Desktop.ini
 *.tmp
 # Runtime node state
 data/
+backup-data/
+data/
+backup-data/

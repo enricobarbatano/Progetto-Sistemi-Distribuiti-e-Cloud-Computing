@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	backuppb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/backuppb"
 	consensuspb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/consensuspb"
 	kvpb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/kvpb"
 
@@ -42,7 +43,7 @@ const defaultSnapshotThreshold uint64 = 1000
 type ConsensusNode struct {
 	consensuspb.UnimplementedConsensusServiceServer
 	kvpb.UnimplementedKeyValueServiceServer
-
+	backuppb.UnimplementedBackupNodeServiceServer
 	mu sync.Mutex
 
 	id      string
