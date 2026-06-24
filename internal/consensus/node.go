@@ -36,6 +36,8 @@ import (
 	consensuspb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/consensuspb"
 	kvpb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/kvpb"
 
+	"github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/internal/storage"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -91,7 +93,11 @@ type ConsensusNode struct {
 	nextIndex  map[string]uint64
 	matchIndex map[string]uint64
 
-	data map[string]string
+	// store rappresenta la macchina a stati key-value locale.
+	//
+	// ConsensusNode non modifica più direttamente una map[string]string,
+	// ma applica le entry committed delegando allo storage.
+	store *storage.KVStore
 
 	stateFile         string
 	walFile           string
@@ -141,7 +147,7 @@ func NewConsensusNode(id string, address string, peers map[string]string, dataDi
 		nextIndex:  make(map[string]uint64),
 		matchIndex: make(map[string]uint64),
 
-		data: make(map[string]string),
+		store: storage.NewKVStore(),
 
 		stateFile:         filepath.Join(dataDir, fmt.Sprintf("%s_state.json", id)),
 		walFile:           filepath.Join(dataDir, fmt.Sprintf("%s_wal.log", id)),
@@ -245,21 +251,7 @@ func (n *ConsensusNode) markPeerOnlineLocked(peerID string) {
 }
 
 func (n *ConsensusNode) cloneDataLocked() map[string]string {
-	copyData := make(map[string]string, len(n.data))
-	for key, value := range n.data {
-		copyData[key] = value
-	}
-
-	return copyData
-}
-
-func cloneData(data map[string]string) map[string]string {
-	copyData := make(map[string]string, len(data))
-	for key, value := range data {
-		copyData[key] = value
-	}
-
-	return copyData
+	return n.store.Snapshot()
 }
 
 func (n *ConsensusNode) appendWALLocked() error {
@@ -489,7 +481,7 @@ func (n *ConsensusNode) loadSnapshotIfNewerLocked() error {
 		return nil
 	}
 
-	n.data = cloneData(snapshot.Data)
+	n.store.Restore(snapshot.Data)
 	n.lastApplied = snapshot.LastIncludedIndex
 
 	if snapshot.LastIncludedIndex > n.commitIndex {
@@ -515,7 +507,7 @@ func (n *ConsensusNode) restorePersistentStateLocked(state *persistentState) {
 	}
 
 	if state.Data != nil {
-		n.data = cloneData(state.Data)
+		n.store.Restore(state.Data)
 		n.lastApplied = state.LastApplied
 		if n.lastApplied > n.commitIndex {
 			n.lastApplied = n.commitIndex
@@ -527,7 +519,7 @@ func (n *ConsensusNode) restorePersistentStateLocked(state *persistentState) {
 }
 
 func (n *ConsensusNode) rebuildStateMachineFromCommittedLogLocked() {
-	n.data = make(map[string]string)
+	n.store.Reset()
 	n.lastApplied = 0
 	n.applyCommittedEntriesLocked()
 }
@@ -540,21 +532,9 @@ func (n *ConsensusNode) applyCommittedEntriesLocked() {
 			break
 		}
 
-		switch entry.Operation {
-		case consensuspb.LogOperation_LOG_OPERATION_PUT:
-			n.data[entry.Key] = entry.Value
-
-		case consensuspb.LogOperation_LOG_OPERATION_DELETE:
-			delete(n.data, entry.Key)
-
-		case consensuspb.LogOperation_LOG_OPERATION_NOOP:
-			// NOOP non modifica la macchina a stati.
-
-		default:
-			// Operazioni non riconosciute vengono ignorate in questa fase.
-		}
-
+		n.store.Apply(entry)
 		n.lastApplied = nextIndex
+
 	}
 
 	n.maybeSaveSnapshotLocked()
@@ -1331,7 +1311,7 @@ func (n *ConsensusNode) Get(ctx context.Context, req *kvpb.GetRequest) (*kvpb.Ge
 		}, nil
 	}
 
-	value, ok := n.data[req.Key]
+	value, ok := n.store.Get(req.Key)
 	if !ok {
 		return &kvpb.GetResponse{
 			Found:      false,
