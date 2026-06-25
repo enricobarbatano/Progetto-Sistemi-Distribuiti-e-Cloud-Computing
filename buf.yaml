@@ -7,9 +7,6 @@ lint:
   use:
     - STANDARD
   except:
-    # Il progetto usa package brevi e go_package già espliciti.
-    # Manteniamo la configurazione abbastanza permissiva per non forzare
-    # rename invasivi dei package proto già usati dal codice Go.
     - PACKAGE_DIRECTORY_MATCH
 
 breaking:

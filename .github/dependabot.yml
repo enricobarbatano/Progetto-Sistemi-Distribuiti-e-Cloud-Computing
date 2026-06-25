@@ -11,9 +11,28 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "actions/checkout"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "actions/setup-go"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "docker/setup-buildx-action"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "docker/build-push-action"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "aquasecurity/trivy-action"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "bufbuild/buf-action"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: docker
-    directory: /
+    directory: /deployments/docker
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

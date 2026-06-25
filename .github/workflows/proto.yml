@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   proto-ci:
-    name: Protobuf lint, breaking check and generated code drift
+    name: Protobuf lint and generated code drift
     runs-on: ubuntu-latest
 
     steps:
@@ -48,20 +48,20 @@ jobs:
       - name: Buf format check
         run: buf format --diff --exit-code
 
-      - name: Buf breaking check against main
+      - name: Buf breaking check against base branch
         if: github.event_name == 'pull_request'
         run: buf breaking --against '.git#branch=${{ github.base_ref }}'
-
-      - name: Install protoc plugins
-        run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Install protoc
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc Go plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Regenerate protobuf stubs
         run: |

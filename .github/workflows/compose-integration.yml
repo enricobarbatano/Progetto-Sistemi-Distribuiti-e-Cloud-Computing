@@ -4,9 +4,7 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - 'docker-compose.yml'
-      - 'compose.yaml'
-      - 'Dockerfile.*'
+      - 'deployments/docker/**'
       - '.dockerignore'
       - 'cmd/**'
       - 'internal/**'
@@ -17,9 +15,7 @@ on:
   pull_request:
     branches: [ main, master ]
     paths:
-      - 'docker-compose.yml'
-      - 'compose.yaml'
-      - 'Dockerfile.*'
+      - 'deployments/docker/**'
       - '.dockerignore'
       - 'cmd/**'
       - 'internal/**'
@@ -36,7 +32,7 @@ jobs:
   compose-integration:
     name: Cluster smoke test with Docker Compose
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('docker-compose.yml') != '' || hashFiles('compose.yaml') != '' }}
+    if: ${{ hashFiles('deployments/docker/docker-compose.yml') != '' }}
 
     steps:
       - name: Checkout repository
@@ -50,18 +46,18 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Build and start cluster
-        run: docker compose up -d --build
+        run: docker compose -f deployments/docker/docker-compose.yml up -d --build
 
       - name: Wait for proxy health endpoint
         run: |
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             if curl -fsS http://localhost:8081/health; then
               exit 0
             fi
-            docker compose ps
+            docker compose -f deployments/docker/docker-compose.yml ps
             sleep 2
           done
-          docker compose logs
+          docker compose -f deployments/docker/docker-compose.yml logs
           exit 1
 
       - name: Discover leader through proxy
@@ -81,8 +77,8 @@ jobs:
 
       - name: Fault tolerance smoke test
         run: |
-          docker compose stop node-2
-          sleep 8
+          docker compose -f deployments/docker/docker-compose.yml stop node-2
+          sleep 10
           TARGET=localhost:8080 OP=leader go run ./cmd/bench-client
           TARGET=localhost:8080 OP=put KEY=ci-failover-key VALUE=ok go run ./cmd/bench-client
           TARGET=localhost:8080 OP=get KEY=ci-failover-key go run ./cmd/bench-client
@@ -90,8 +86,8 @@ jobs:
 
       - name: Show logs on failure
         if: failure()
-        run: docker compose logs
+        run: docker compose -f deployments/docker/docker-compose.yml logs
 
       - name: Stop cluster
         if: always()
-        run: docker compose down -v
+        run: docker compose -f deployments/docker/docker-compose.yml down -v

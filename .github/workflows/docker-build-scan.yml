@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - 'Dockerfile.*'
+      - 'deployments/docker/**'
       - '.dockerignore'
       - 'cmd/**'
       - 'internal/**'
@@ -15,7 +15,7 @@ on:
   pull_request:
     branches: [ main, master ]
     paths:
-      - 'Dockerfile.*'
+      - 'deployments/docker/**'
       - '.dockerignore'
       - 'cmd/**'
       - 'internal/**'
@@ -23,6 +23,7 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/docker-build-scan.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,18 +33,18 @@ jobs:
   docker-build-scan:
     name: Build and scan service images
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('Dockerfile.consensus-node') != '' && hashFiles('Dockerfile.client-proxy') != '' && hashFiles('Dockerfile.backup-service') != '' }}
+    if: ${{ hashFiles('deployments/docker/Dockerfile.consensus-node') != '' && hashFiles('deployments/docker/Dockerfile.client-proxy') != '' && hashFiles('deployments/docker/Dockerfile.backup-service') != '' }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
           - image: consensus-node
-            dockerfile: Dockerfile.consensus-node
+            dockerfile: deployments/docker/Dockerfile.consensus-node
           - image: client-proxy
-            dockerfile: Dockerfile.client-proxy
+            dockerfile: deployments/docker/Dockerfile.client-proxy
           - image: backup-service
-            dockerfile: Dockerfile.backup-service
+            dockerfile: deployments/docker/Dockerfile.backup-service
 
     steps:
       - name: Checkout repository
