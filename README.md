@@ -1,6 +1,6 @@
 # Progetto Sistemi Distribuiti e Cloud Computing
 
-Storage chiave-valore distribuito, replicato e fortemente consistente implementato in Go.
+Storage  chiave-valore distribuito, replicato e fortemente consistente implementato in Go.
 
 ## Componenti principali
 
