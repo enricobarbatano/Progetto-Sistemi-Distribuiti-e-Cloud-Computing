@@ -32,7 +32,6 @@ jobs:
   compose-integration:
     name: Cluster smoke test with Docker Compose
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('deployments/docker/docker-compose.yml') != '' }}
 
     steps:
       - name: Checkout repository
@@ -60,29 +59,53 @@ jobs:
           docker compose -f deployments/docker/docker-compose.yml logs
           exit 1
 
-      - name: Discover leader through proxy
+      - name: Wait for Raft leader
         run: |
-          TARGET=localhost:8080 OP=leader go run ./cmd/bench-client
+          for i in $(seq 1 90); do
+            if TARGET=localhost:8080 OP=leader go run ./cmd/bench-client | tee leader.log | grep -q "has_leader=true"; then
+              cat leader.log
+              exit 0
+            fi
+            docker compose -f deployments/docker/docker-compose.yml logs --tail=80
+            sleep 2
+          done
+          docker compose -f deployments/docker/docker-compose.yml logs
+          exit 1
 
       - name: Put/Get through proxy
         run: |
           TARGET=localhost:8080 OP=put KEY=ci-docker-key VALUE=ci-docker-value go run ./cmd/bench-client
-          TARGET=localhost:8080 OP=get KEY=ci-docker-key go run ./cmd/bench-client
+          TARGET=localhost:8080 OP=get KEY=ci-docker-key go run ./cmd/bench-client | tee get.log
+          grep -q "found=true" get.log
+          grep -q "value=ci-docker-value" get.log
 
       - name: Trigger backup through backup service
         run: |
           TARGET=localhost:9090 OP=status go run ./cmd/backup-client
-          TARGET=localhost:9090 OP=backup FORCE_SNAPSHOT=true COMPACT_AFTER_DOWNLOAD=true go run ./cmd/backup-client
+          TARGET=localhost:9090 OP=backup FORCE_SNAPSHOT=true COMPACT_AFTER_DOWNLOAD=true go run ./cmd/backup-client | tee backup.log
+          grep -q "accepted=true" backup.log
           TARGET=localhost:9090 OP=status go run ./cmd/backup-client
 
       - name: Fault tolerance smoke test
         run: |
           docker compose -f deployments/docker/docker-compose.yml stop node-2
-          sleep 10
-          TARGET=localhost:8080 OP=leader go run ./cmd/bench-client
+          sleep 12
+
+          for i in $(seq 1 60); do
+            if TARGET=localhost:8080 OP=leader go run ./cmd/bench-client | tee leader-after-stop.log | grep -q "has_leader=true"; then
+              cat leader-after-stop.log
+              break
+            fi
+            sleep 2
+          done
+
           TARGET=localhost:8080 OP=put KEY=ci-failover-key VALUE=ok go run ./cmd/bench-client
-          TARGET=localhost:8080 OP=get KEY=ci-failover-key go run ./cmd/bench-client
-          TARGET=localhost:9090 OP=backup FORCE_SNAPSHOT=true COMPACT_AFTER_DOWNLOAD=true go run ./cmd/backup-client
+          TARGET=localhost:8080 OP=get KEY=ci-failover-key go run ./cmd/bench-client | tee failover-get.log
+          grep -q "found=true" failover-get.log
+          grep -q "value=ok" failover-get.log
+
+          TARGET=localhost:9090 OP=backup FORCE_SNAPSHOT=true COMPACT_AFTER_DOWNLOAD=true go run ./cmd/backup-client | tee backup-partial.log
+          grep -q "accepted=true" backup-partial.log
 
       - name: Show logs on failure
         if: failure()
