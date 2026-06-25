@@ -15,7 +15,7 @@ on:
       - 'gen/go/**'
       - 'buf.yaml'
       - '.github/workflows/proto.yml'
-
+  workflow_dispatch:     
 permissions:
   contents: read
 
