@@ -15,7 +15,8 @@ on:
       - 'gen/go/**'
       - 'buf.yaml'
       - '.github/workflows/proto.yml'
-  workflow_dispatch:     
+  workflow_dispatch:
+
 permissions:
   contents: read
 
@@ -53,15 +54,22 @@ jobs:
         run: buf breaking --against '.git#branch=${{ github.base_ref }}'
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "33.0"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install protoc Go plugins
+      - name: Install pinned protoc Go plugins
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Show protobuf tool versions
+        run: |
+          protoc --version
+          protoc-gen-go --version
+          protoc-gen-go-grpc --version
 
       - name: Regenerate protobuf stubs
         run: |
