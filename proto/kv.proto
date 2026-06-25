@@ -76,8 +76,7 @@ message DeleteResponse {
 }
 
 // Richiesta per conoscere il leader corrente.
-message GetLeaderRequest {
-}
+message GetLeaderRequest {}
 
 // Risposta con informazioni sul leader.
 message GetLeaderResponse {

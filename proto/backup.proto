@@ -103,8 +103,7 @@ message TriggerBackupResponse {
 }
 
 // Richiesta stato backup.
-message GetBackupStatusRequest {
-}
+message GetBackupStatusRequest {}
 
 // Risposta stato backup.
 message GetBackupStatusResponse {
