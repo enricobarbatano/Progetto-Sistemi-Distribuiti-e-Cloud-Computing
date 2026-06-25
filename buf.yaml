@@ -7,7 +7,22 @@ lint:
   use:
     - STANDARD
   except:
+    # Il progetto mantiene volutamente i tre contratti principali
+    # nella cartella proto/:
+    #
+    #   proto/consensus.proto -> package consensus
+    #   proto/kv.proto        -> package kv
+    #   proto/backup.proto    -> package backup
+    #
+    # Buf, con STANDARD, preferisce una struttura versionata del tipo
+    # proto/consensus/v1 con package consensus.v1.
+    # Per evitare un refactor invasivo dei contratti gRPC già stabilizzati,
+    # disabilitiamo solo le regole legate al layout package/directory
+    # e al suffisso di versione del package.
+    - DIRECTORY_SAME_PACKAGE
     - PACKAGE_DIRECTORY_MATCH
+    - PACKAGE_SAME_DIRECTORY
+    - PACKAGE_VERSION_SUFFIX
 
 breaking:
   use:
