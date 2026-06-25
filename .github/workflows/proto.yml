@@ -1,0 +1,76 @@
+name: Protobuf CI
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'proto/**'
+      - 'gen/go/**'
+      - 'buf.yaml'
+      - '.github/workflows/proto.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'proto/**'
+      - 'gen/go/**'
+      - 'buf.yaml'
+      - '.github/workflows/proto.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  proto-ci:
+    name: Protobuf lint, breaking check and generated code drift
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Set up Buf
+        uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+
+      - name: Buf lint
+        run: buf lint
+
+      - name: Buf format check
+        run: buf format --diff --exit-code
+
+      - name: Buf breaking check against main
+        if: github.event_name == 'pull_request'
+        run: buf breaking --against '.git#branch=${{ github.base_ref }}'
+
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Regenerate protobuf stubs
+        run: |
+          protoc --go_out=. --go_opt=module=github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing \
+            --go-grpc_out=. --go-grpc_opt=module=github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing \
+            proto/consensus.proto proto/kv.proto proto/backup.proto
+
+      - name: Verify generated files are committed
+        run: git diff --exit-code proto gen/go
+
+      - name: Run Go tests after proto generation
+        run: go test ./...

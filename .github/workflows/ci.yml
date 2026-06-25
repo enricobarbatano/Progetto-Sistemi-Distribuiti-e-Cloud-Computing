@@ -2,18 +2,16 @@ name: Go CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main, master ]
   pull_request:
-    branches:
-      - main
+    branches: [ main, master ]
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: Build and test
+  go-ci:
+    name: Go quality checks
     runs-on: ubuntu-latest
 
     steps:
@@ -21,18 +19,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: go.sum
 
-      - name: Download dependencies
-        run: go mod download
+      - name: Verify Go modules are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
 
-      - name: Verify dependencies
-        run: go mod verify
-
-      - name: Check formatting
+      - name: Check gofmt
         run: |
           test -z "$(gofmt -l .)"
 
@@ -41,3 +39,11 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+      - name: Build binaries
+        run: |
+          go build ./cmd/consensus-node
+          go build ./cmd/client-proxy
+          go build ./cmd/backup-service
+          go build ./cmd/bench-client
+          go build ./cmd/backup-client

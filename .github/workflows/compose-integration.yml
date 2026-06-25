@@ -1,0 +1,97 @@
+name: Docker Compose Integration
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'docker-compose.yml'
+      - 'compose.yaml'
+      - 'Dockerfile.*'
+      - '.dockerignore'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'gen/go/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/compose-integration.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'docker-compose.yml'
+      - 'compose.yaml'
+      - 'Dockerfile.*'
+      - '.dockerignore'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'gen/go/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/compose-integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compose-integration:
+    name: Cluster smoke test with Docker Compose
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('docker-compose.yml') != '' || hashFiles('compose.yaml') != '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Build and start cluster
+        run: docker compose up -d --build
+
+      - name: Wait for proxy health endpoint
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8081/health; then
+              exit 0
+            fi
+            docker compose ps
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+
+      - name: Discover leader through proxy
+        run: |
+          TARGET=localhost:8080 OP=leader go run ./cmd/bench-client
+
+      - name: Put/Get through proxy
+        run: |
+          TARGET=localhost:8080 OP=put KEY=ci-docker-key VALUE=ci-docker-value go run ./cmd/bench-client
+          TARGET=localhost:8080 OP=get KEY=ci-docker-key go run ./cmd/bench-client
+
+      - name: Trigger backup through backup service
+        run: |
+          TARGET=localhost:9090 OP=status go run ./cmd/backup-client
+          TARGET=localhost:9090 OP=backup FORCE_SNAPSHOT=true COMPACT_AFTER_DOWNLOAD=true go run ./cmd/backup-client
+          TARGET=localhost:9090 OP=status go run ./cmd/backup-client
+
+      - name: Fault tolerance smoke test
+        run: |
+          docker compose stop node-2
+          sleep 8
+          TARGET=localhost:8080 OP=leader go run ./cmd/bench-client
+          TARGET=localhost:8080 OP=put KEY=ci-failover-key VALUE=ok go run ./cmd/bench-client
+          TARGET=localhost:8080 OP=get KEY=ci-failover-key go run ./cmd/bench-client
+          TARGET=localhost:9090 OP=backup FORCE_SNAPSHOT=true COMPACT_AFTER_DOWNLOAD=true go run ./cmd/backup-client
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop cluster
+        if: always()
+        run: docker compose down -v
