@@ -1,0 +1,128 @@
+services:
+  node-1:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.consensus-node
+    container_name: sdcc-node-1
+    environment:
+      NODE_ID: node-1
+      NODE_ADDRESS: node-1:50051
+      PORT: "50051"
+      DATA_DIR: /data
+      PEERS: node-2=node-2:50051,node-3=node-3:50051
+      SNAPSHOT_THRESHOLD: "5"
+    volumes:
+      - node1-data:/data
+    ports:
+      - "50051:50051"
+    restart: unless-stopped
+    networks:
+      - sdcc-net
+
+  node-2:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.consensus-node
+    container_name: sdcc-node-2
+    environment:
+      NODE_ID: node-2
+      NODE_ADDRESS: node-2:50051
+      PORT: "50051"
+      DATA_DIR: /data
+      PEERS: node-1=node-1:50051,node-3=node-3:50051
+      SNAPSHOT_THRESHOLD: "5"
+    volumes:
+      - node2-data:/data
+    ports:
+      - "50052:50051"
+    restart: unless-stopped
+    networks:
+      - sdcc-net
+
+  node-3:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.consensus-node
+    container_name: sdcc-node-3
+    environment:
+      NODE_ID: node-3
+      NODE_ADDRESS: node-3:50051
+      PORT: "50051"
+      DATA_DIR: /data
+      PEERS: node-1=node-1:50051,node-2=node-2:50051
+      SNAPSHOT_THRESHOLD: "5"
+    volumes:
+      - node3-data:/data
+    ports:
+      - "50053:50051"
+    restart: unless-stopped
+    networks:
+      - sdcc-net
+
+  client-proxy:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.client-proxy
+    container_name: sdcc-client-proxy
+    environment:
+      PROXY_PORT: "8080"
+      PROXY_HEALTH_PORT: "8081"
+      CONSENSUS_NODES: node-1:50051,node-2:50051,node-3:50051
+      RPC_TIMEOUT_MS: "800"
+      MAX_RETRIES: "3"
+      BACKOFF_MS: "100"
+      MAX_BACKOFF_MS: "1500"
+      JITTER_RATIO: "100"
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    depends_on:
+      - node-1
+      - node-2
+      - node-3
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - sdcc-net
+
+  backup-service:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.backup-service
+    container_name: sdcc-backup-service
+    environment:
+      BACKUP_PORT: "9090"
+      BACKUP_SERVICE_ID: backup-service-1
+      CONSENSUS_NODES: node-1:50051,node-2:50051,node-3:50051
+      BACKUP_DIR: /backup-data
+      RPC_TIMEOUT_MS: "1000"
+      MAX_RETRIES: "3"
+      BACKOFF_MS: "200"
+      BACKUP_INTERVAL_MS: "0"
+      COMPACT_AFTER_DOWNLOAD: "true"
+    volumes:
+      - backup-data:/backup-data
+    ports:
+      - "9090:9090"
+    depends_on:
+      - node-1
+      - node-2
+      - node-3
+    restart: unless-stopped
+    networks:
+      - sdcc-net
+
+networks:
+  sdcc-net:
+    driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  backup-data:
