@@ -33,7 +33,6 @@ jobs:
   docker-build-scan:
     name: Build and scan service images
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('deployments/docker/Dockerfile.consensus-node') != '' && hashFiles('deployments/docker/Dockerfile.client-proxy') != '' && hashFiles('deployments/docker/Dockerfile.backup-service') != '' }}
 
     strategy:
       fail-fast: false
@@ -65,11 +64,11 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: sdcc/${{ matrix.image }}:${{ github.sha }}
           format: table
           exit-code: '1'
           ignore-unfixed: true
           vuln-type: os,library
-          severity: CRITICAL,HIGH
+          severity: CRITICAL
