@@ -104,7 +104,7 @@ documents/
 Vedi anche:
 
 ```text
-REQUIREMENTS.md
+docs/REQUIREMENTS.md
 ```
 
 Requisiti principali:
