@@ -24,6 +24,8 @@ type Config struct {
 	ClusterSize int
 	Puts        int
 	Gets        int
+	WarmupPuts  int
+	WarmupGets  int
 	Concurrency int
 	KeyPrefix   string
 	CSVOut      string
@@ -56,8 +58,8 @@ type Summary struct {
 
 func main() {
 	cfg := loadConfig()
-	log.Printf("perf-client target=%s cluster_size=%d puts=%d gets=%d concurrency=%d key_prefix=%s csv_out=%s summary_out=%s",
-		cfg.Target, cfg.ClusterSize, cfg.Puts, cfg.Gets, cfg.Concurrency, cfg.KeyPrefix, cfg.CSVOut, cfg.SummaryOut)
+	log.Printf("perf-client target=%s cluster_size=%d warmup_puts=%d warmup_gets=%d puts=%d gets=%d concurrency=%d key_prefix=%s csv_out=%s summary_out=%s",
+		cfg.Target, cfg.ClusterSize, cfg.WarmupPuts, cfg.WarmupGets, cfg.Puts, cfg.Gets, cfg.Concurrency, cfg.KeyPrefix, cfg.CSVOut, cfg.SummaryOut)
 
 	conn, err := grpc.NewClient(cfg.Target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -67,9 +69,46 @@ func main() {
 
 	client := kvpb.NewKeyValueServiceClient(conn)
 
+	// Warm-up: esegue alcune operazioni prima della misurazione vera.
+	// Le latenze di warm-up non vengono scritte nei CSV, così si riduce
+	// l'effetto di prima connessione gRPC, cache iniziale e scheduling Docker.
+	if cfg.WarmupPuts > 0 {
+		log.Printf("starting warm-up puts: %d", cfg.WarmupPuts)
+		_ = runOperations(cfg, "warmup-put", cfg.WarmupPuts, false, func(ctx context.Context, index int) (bool, string) {
+			key := fmt.Sprintf("%s-warmup-key-%06d", cfg.KeyPrefix, index)
+			value := fmt.Sprintf("%s-warmup-value-%06d", cfg.KeyPrefix, index)
+			resp, err := client.Put(ctx, &kvpb.PutRequest{Key: key, Value: value})
+			if err != nil {
+				return false, err.Error()
+			}
+			if !resp.Success {
+				return false, responseError(resp.Error, resp.LeaderHint)
+			}
+			return true, ""
+		})
+	}
+
+	if cfg.WarmupGets > 0 {
+		log.Printf("starting warm-up gets: %d", cfg.WarmupGets)
+		_ = runOperations(cfg, "warmup-get", cfg.WarmupGets, false, func(ctx context.Context, index int) (bool, string) {
+			key := fmt.Sprintf("%s-warmup-key-%06d", cfg.KeyPrefix, index)
+			resp, err := client.Get(ctx, &kvpb.GetRequest{Key: key})
+			if err != nil {
+				return false, err.Error()
+			}
+			if !resp.Found {
+				if resp.Error != "" {
+					return false, resp.Error
+				}
+				return false, "key not found"
+			}
+			return true, ""
+		})
+	}
+
 	results := make([]Result, 0, cfg.Puts+cfg.Gets)
 
-	putResults := runOperations(cfg, "put", cfg.Puts, func(ctx context.Context, index int) (bool, string) {
+	putResults := runOperations(cfg, "put", cfg.Puts, true, func(ctx context.Context, index int) (bool, string) {
 		key := fmt.Sprintf("%s-key-%06d", cfg.KeyPrefix, index)
 		value := fmt.Sprintf("%s-value-%06d", cfg.KeyPrefix, index)
 		resp, err := client.Put(ctx, &kvpb.PutRequest{Key: key, Value: value})
@@ -77,16 +116,13 @@ func main() {
 			return false, err.Error()
 		}
 		if !resp.Success {
-			if resp.LeaderHint != "" {
-				return false, fmt.Sprintf("%s leader_hint=%s", resp.Error, resp.LeaderHint)
-			}
-			return false, resp.Error
+			return false, responseError(resp.Error, resp.LeaderHint)
 		}
 		return true, ""
 	})
 	results = append(results, putResults...)
 
-	getResults := runOperations(cfg, "get", cfg.Gets, func(ctx context.Context, index int) (bool, string) {
+	getResults := runOperations(cfg, "get", cfg.Gets, true, func(ctx context.Context, index int) (bool, string) {
 		key := fmt.Sprintf("%s-key-%06d", cfg.KeyPrefix, index)
 		resp, err := client.Get(ctx, &kvpb.GetRequest{Key: key})
 		if err != nil {
@@ -128,6 +164,8 @@ func loadConfig() Config {
 		ClusterSize: clusterSize,
 		Puts:        getEnvInt("PUTS", 300),
 		Gets:        getEnvInt("GETS", 300),
+		WarmupPuts:  getEnvInt("WARMUP_PUTS", 20),
+		WarmupGets:  getEnvInt("WARMUP_GETS", 20),
 		Concurrency: max(1, getEnvInt("CONCURRENCY", 1)),
 		KeyPrefix:   getEnv("KEY_PREFIX", fmt.Sprintf("perf-%dnodes", clusterSize)),
 		CSVOut:      getEnv("CSV_OUT", fmt.Sprintf("reports/raw/scalability_%dnodes.csv", clusterSize)),
@@ -136,7 +174,7 @@ func loadConfig() Config {
 	}
 }
 
-func runOperations(cfg Config, operation string, count int, fn func(context.Context, int) (bool, string)) []Result {
+func runOperations(cfg Config, operation string, count int, reportProgress bool, fn func(context.Context, int) (bool, string)) []Result {
 	if count <= 0 {
 		return nil
 	}
@@ -168,7 +206,7 @@ func runOperations(cfg Config, operation string, count int, fn func(context.Cont
 				}
 
 				current := atomic.AddInt64(&completed, 1)
-				if current%100 == 0 || current == int64(count) {
+				if reportProgress && (current%100 == 0 || current == int64(count)) {
 					log.Printf("operation=%s completed=%d/%d", operation, current, count)
 				}
 			}
@@ -343,4 +381,11 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func responseError(errorText, leaderHint string) string {
+	if leaderHint != "" {
+		return fmt.Sprintf("%s leader_hint=%s", errorText, leaderHint)
+	}
+	return errorText
 }
