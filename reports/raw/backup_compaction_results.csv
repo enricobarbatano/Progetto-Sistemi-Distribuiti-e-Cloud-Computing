@@ -1,0 +1,4 @@
+timestamp_utc,dataset_size,put_successes,put_failures,put_duration_ms,backup_accepted,backup_id,downloaded_snapshots,backup_duration_ms,error
+2026-06-26T16:28:29.7444255Z,100,100,0,11748,true,backup_1782491321413802575,5,462,
+2026-06-26T16:28:41.9589519Z,300,300,0,34660,true,backup_1782491356262561036,5,143,
+2026-06-26T16:29:16.7689754Z,600,600,0,73690,true,backup_1782491430098637544,5,179,
