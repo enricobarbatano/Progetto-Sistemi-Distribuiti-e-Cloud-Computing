@@ -32,18 +32,18 @@ type Config struct {
 }
 
 type TrialResult struct {
-	TimestampUTC            string
-	Trial                   int
-	ClusterSize             int
-	OldLeader               string
-	NewLeader               string
-	NewLeaderTimeMS         int64
-	FirstSuccessfulPutMS    int64
-	DowntimeMS              int64
-	FailedPuts              int
-	SuccessfulPuts          int
-	LeaderPolls             int
-	Notes                   string
+	TimestampUTC         string
+	Trial                int
+	ClusterSize          int
+	OldLeader            string
+	NewLeader            string
+	NewLeaderTimeMS      int64
+	FirstSuccessfulPutMS int64
+	DowntimeMS           int64
+	FailedPuts           int
+	SuccessfulPuts       int
+	LeaderPolls          int
+	Notes                string
 }
 
 func main() {
