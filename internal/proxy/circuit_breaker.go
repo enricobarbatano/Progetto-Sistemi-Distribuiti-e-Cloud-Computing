@@ -1,15 +1,8 @@
-// Package proxy contiene la logica interna del Client Proxy Service.
+// Questo file contiene la gestione dei Circuit Breaker usati dal Proxy.
 //
-// Questo file contiene CircuitBreakerManager, il componente responsabile
-// della protezione delle chiamate verso i Consensus Node tramite Circuit Breaker.
-//
-// Il Circuit Breaker evita che il Proxy continui a inviare richieste a un nodo
-// che sta fallendo ripetutamente. In questo modo si riduce il rischio di
-// accumulare timeout, bloccare richieste client o peggiorare un guasto già in corso.
-//
-// Il manager mantiene un circuito separato per ogni nodo del cluster:
-// se node-1 è irraggiungibile, il circuito di node-1 può aprirsi senza bloccare
-// le chiamate verso node-2 o node-3.
+// Ogni Consensus Node è protetto da un circuito indipendente. In questo modo,
+// se un nodo diventa non disponibile, il Proxy evita di continuare a inviare
+// richieste inutili verso quel nodo e preserva risorse per i nodi sani.
 package proxy
 
 import (
@@ -21,16 +14,18 @@ import (
 	"github.com/sony/gobreaker/v2"
 )
 
-// CircuitBreakerManager mantiene un Circuit Breaker per ogni Consensus Node.
+// CircuitBreakerManager gestisce i Circuit Breaker associati ai nodi.
 //
-// La chiave della mappa è l'indirizzo del nodo, ad esempio:
-//
-//	localhost:50051
-//
-// Ogni nodo ha un circuito indipendente, così un nodo guasto non rende
-// automaticamente indisponibile tutto il cluster.
+// Il manager mantiene un circuito per nodo o indirizzo. Questa granularità
+// consente fault isolation: il guasto di un nodo non impedisce al Proxy di
+// contattare gli altri nodi del cluster.
 type CircuitBreakerManager struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+
+	// breakers associa ogni nodo al proprio Circuit Breaker.
+	//
+	// Circuiti separati evitano che gli errori di un peer influenzino le richieste
+	// verso peer ancora disponibili.
 	breakers map[string]*gobreaker.CircuitBreaker[any]
 }
 
@@ -44,12 +39,15 @@ func NewCircuitBreakerManager() *CircuitBreakerManager {
 	}
 }
 
-// Execute esegue una richiesta protetta dal Circuit Breaker del nodo indicato.
+// Execute esegue una RPC protetta dal Circuit Breaker del nodo.
 //
-// Se il circuito è closed, la richiesta viene eseguita normalmente.
-// Se il circuito è open, gobreaker restituisce subito errore senza chiamare req.
-// Se il circuito è half-open, lascia passare un numero limitato di richieste
-// di prova per capire se il nodo è tornato sano.
+// Se il circuito è Closed, la chiamata viene eseguita normalmente. Se gli errori
+// superano la soglia configurata, il circuito può passare a Open e rifiutare
+// temporaneamente nuove chiamate verso quel nodo. Dopo il timeout, lo stato
+// Half-Open consente richieste di prova.
+//
+// Questo meccanismo evita cascading failure: il Proxy non continua a consumare
+// tempo e risorse su nodi notoriamente non disponibili.
 func (m *CircuitBreakerManager) Execute(address string, req func() (any, error)) (any, error) {
 	if address == "" {
 		return nil, fmt.Errorf("circuit breaker address cannot be empty")

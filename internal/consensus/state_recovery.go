@@ -1,10 +1,14 @@
-// Package consensus contiene la logica del protocollo di consenso.
+// Package consensus contiene anche la gestione dello stato persistente del nodo.
 //
-// Questo file raccoglie la parte di ConsensusNode legata allo stato persistente,
-// al recovery, agli snapshot locali e all'applicazione delle entry committed.
+// Questo file raccoglie la logica di collegamento tra ConsensusNode,
+// internal/persistence e internal/storage: costruzione dello stato persistente,
+// recovery all'avvio, salvataggio snapshot, compattazione logica e applicazione
+// delle entry committed alla state machine.
 //
 // La persistenza fisica dei file è delegata a internal/persistence, mentre la
-// mappa key-value è delegata a internal/storage.
+// mappa key-value è delegata a internal/storage. ConsensusNode mantiene solo la
+// logica che decide quando salvare, ripristinare o applicare entry.
+
 package consensus
 
 import (
@@ -15,11 +19,18 @@ import (
 )
 
 // cloneDataLocked restituisce una copia dello stato key-value corrente.
+//
+// Deve essere chiamata quando il chiamante possiede n.mu. La copia evita che il
+// livello di persistenza possa modificare direttamente la state machine.
 func (n *ConsensusNode) cloneDataLocked() map[string]string {
 	return n.store.Snapshot()
 }
 
 // persistentStateLocked costruisce lo stato persistente corrente del nodo.
+//
+// Include termine, voto, log, commit index, last applied, dati della state
+// machine e bordo dello snapshot. Questo oggetto viene poi salvato dal
+// persistenceManager come checkpoint compatto.
 func (n *ConsensusNode) persistentStateLocked() persistence.State {
 	return persistence.State{
 		CurrentTerm:       n.currentTerm,
@@ -33,16 +44,21 @@ func (n *ConsensusNode) persistentStateLocked() persistence.State {
 	}
 }
 
-// persistLocked salva lo stato corrente del nodo.
+// persistLocked salva lo stato corrente del nodo tramite persistenceManager.
+//
+// Deve essere chiamata con n.mu già acquisito. Il metodo centralizza il passaggio
+// da stato in memoria a stato persistente, lasciando al package persistence i
+// dettagli di JSON, WAL e scrittura atomica.
 func (n *ConsensusNode) persistLocked() error {
 	return n.persistenceManager.Save(n.persistentStateLocked())
 }
 
-// saveSnapshotLocked salva uno snapshot locale e compatta il log.
+// saveSnapshotLocked salva uno snapshot locale e applica compattazione logica.
 //
-// Lo snapshot diventa il checkpoint reale della state machine fino a
-// lastApplied. Dopo il salvataggio, le entry con indice <= lastApplied vengono
-// rimosse dal log fisico.
+// Lo snapshot diventa il checkpoint della state machine fino a lastApplied.
+// Dopo il salvataggio, le entry fino a LastIncludedIndex vengono rimosse dal log
+// in memoria del nodo. Il file WAL fisico resta append-only in questa versione
+// ed è discusso tra le limitazioni del progetto.
 func (n *ConsensusNode) saveSnapshotLocked() error {
 	if n.lastApplied == 0 {
 		return nil
@@ -74,7 +90,11 @@ func (n *ConsensusNode) saveSnapshotLocked() error {
 	return nil
 }
 
-// maybeSaveSnapshotLocked decide se salvare uno snapshot locale.
+// maybeSaveSnapshotLocked decide se creare uno snapshot locale.
+//
+// La soglia è basata su snapshotThreshold: quando lastApplied raggiunge un
+// multiplo della soglia, il nodo prova a salvare uno snapshot. Questo evita di
+// produrre snapshot troppo frequentemente durante la replica.
 func (n *ConsensusNode) maybeSaveSnapshotLocked() {
 	if n.lastApplied == 0 || n.snapshotThreshold == 0 {
 		return
@@ -90,6 +110,11 @@ func (n *ConsensusNode) maybeSaveSnapshotLocked() {
 }
 
 // loadPersistentState carica lo stato persistente del nodo all'avvio.
+//
+// Il recovery combina tre fonti: state.json, snapshot locale e log committed.
+// Se esiste stato persistente, viene ripristinato; se esiste uno snapshot più
+// recente, viene applicato; infine vengono applicate alla state machine eventuali
+// entry committed ma non ancora applied.
 func (n *ConsensusNode) loadPersistentState() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -128,6 +153,10 @@ func (n *ConsensusNode) loadPersistentState() error {
 }
 
 // restoreSnapshotIfNewerLocked applica uno snapshot solo se è più recente.
+//
+// Uno snapshot vecchio o già incluso viene ignorato. Se lo snapshot è valido,
+// la state machine viene ripristinata, lastIncludedIndex e lastIncludedTerm sono
+// aggiornati e il log in memoria viene compattato logicamente.
 func (n *ConsensusNode) restoreSnapshotIfNewerLocked(snapshot persistence.Snapshot) bool {
 	if snapshot.Data == nil {
 		return false
@@ -156,6 +185,11 @@ func (n *ConsensusNode) restoreSnapshotIfNewerLocked(snapshot persistence.Snapsh
 }
 
 // restorePersistentStateLocked ripristina i campi persistenti del nodo.
+//
+// Vengono ripristinati termine, voto, log, indici di snapshot e commit index.
+// Se lo stato contiene già una copia della state machine, viene usata quella;
+// altrimenti la state machine viene ricostruita applicando le entry committed
+// disponibili nel log.
 func (n *ConsensusNode) restorePersistentStateLocked(state persistence.State) {
 	n.currentTerm = state.CurrentTerm
 	n.votedFor = state.VotedFor
@@ -198,6 +232,10 @@ func (n *ConsensusNode) restorePersistentStateLocked(state persistence.State) {
 }
 
 // rebuildStateMachineFromCommittedLogLocked ricostruisce la state machine.
+//
+// Lo store viene svuotato e vengono riapplicate solo le entry committed. Questo
+// evita di rendere visibili operazioni presenti nel log ma non ancora confermate
+// da quorum.
 func (n *ConsensusNode) rebuildStateMachineFromCommittedLogLocked() {
 	n.store.Reset()
 	n.lastApplied = n.lastIncludedIndex
@@ -205,6 +243,10 @@ func (n *ConsensusNode) rebuildStateMachineFromCommittedLogLocked() {
 }
 
 // applyCommittedEntriesLocked applica alla state machine le entry committed.
+//
+// Il metodo avanza lastApplied fino a commitIndex, applicando ogni entry tramite
+// KVStore. Solo le entry committed vengono applicate, preservando la coerenza
+// tra log replicato e stato key-value esposto ai client.
 func (n *ConsensusNode) applyCommittedEntriesLocked() {
 	for n.lastApplied < n.commitIndex {
 		nextIndex := n.lastApplied + 1

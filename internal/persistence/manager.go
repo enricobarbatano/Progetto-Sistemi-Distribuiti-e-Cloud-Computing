@@ -1,17 +1,19 @@
-// Package persistence contiene la gestione dello stato persistente dei nodi.
+// Package persistence gestisce la durabilità su disco dei Consensus Node.
 //
-// Questo package non conosce il protocollo Raft nel dettaglio operativo:
-// non decide quando una entry è committed, non replica log e non gestisce
-// elezioni. Si occupa solo di salvare e caricare da disco:
+// Il package non implementa direttamente il protocollo di consenso: non decide
+// quando una entry è committed, non replica log e non gestisce elezioni.
+// La sua responsabilità è salvare e ricostruire lo stato persistente del nodo.
 //
-//   - lo stato compatto state.json;
-//   - il WAL append-only wal.log;
-//   - lo snapshot locale snapshot.json.
+// La persistenza è basata su tre file principali:
 //
-// Il WAL è event-based: ogni riga rappresenta un evento persistente, per
-// esempio un cambio termine, un voto, una entry aggiunta al log o un avanzamento
-// del commit index. Lo state.json resta un checkpoint compatto per accelerare
-// il recovery.
+//   - state.json: checkpoint compatto dello stato persistente;
+//   - wal.log: Write-Ahead Log event-based e append-only;
+//   - snapshot.json: checkpoint locale della state machine.
+//
+// Il WAL registra eventi persistenti, come aggiornamenti di termine, voto,
+// append del log, avanzamento del commit index e salvataggio snapshot.
+// In questa versione la compattazione è logica: lo stato viene consolidato
+// tramite snapshot, ma il file WAL fisico resta append-only.
 package persistence
 
 import (
@@ -35,14 +37,16 @@ const (
 	walEventSnapshotSaved  = "snapshot_saved"
 )
 
-// State rappresenta lo stato persistente completo del nodo.
+// State rappresenta lo stato persistente completo di un Consensus Node.
 //
-// Contiene lo stato Raft persistente classico, cioè currentTerm, votedFor e log,
-// più alcuni campi utili al recovery robusto del progetto.
+// Contiene lo stato persistente richiesto dal protocollo di consenso, come
+// currentTerm, votedFor e log, insieme a commit index, last applied e dati della
+// state machine. Questo oggetto viene scritto in state.json come checkpoint
+// compatto per velocizzare il recovery dopo un riavvio.
 //
 // LastIncludedIndex e LastIncludedTerm rappresentano il bordo dello snapshot
-// locale. Quando il log viene compattato, le entry fino a LastIncludedIndex non
-// sono più presenti fisicamente nel log, ma restano rappresentate dallo snapshot.
+// locale: le entry fino a LastIncludedIndex possono essere considerate incluse
+// nello snapshot logico.
 type State struct {
 	CurrentTerm uint64                  `json:"current_term"`
 	VotedFor    string                  `json:"voted_for"`
@@ -59,8 +63,9 @@ type State struct {
 // Snapshot rappresenta un checkpoint locale della state machine.
 //
 // Lo snapshot contiene la mappa key-value applicata fino a LastIncludedIndex.
-// LastIncludedTerm serve a mantenere la coerenza del log Raft anche dopo la
-// compaction locale.
+// LastIncludedTerm permette di mantenere la coerenza con il log replicato anche
+// dopo la compattazione logica. Il Backup Service scarica questi snapshot per
+// conservare copie persistenti dello stato dei nodi.
 type Snapshot struct {
 	LastIncludedIndex uint64            `json:"last_included_index"`
 	LastIncludedTerm  uint64            `json:"last_included_term"`
@@ -69,8 +74,12 @@ type Snapshot struct {
 
 // walEvent rappresenta un singolo evento append-only del WAL.
 //
-// Il campo Type indica quale evento è stato registrato. Gli altri campi vengono
-// valorizzati solo quando servono per quello specifico evento.
+// Ogni riga del wal.log contiene un evento JSON indipendente. Questo approccio
+// event-based evita di riscrivere l'intero stato a ogni modifica e consente,
+// in assenza di state.json, di ricostruire lo stato tramite replay sequenziale.
+//
+// Il campo Type identifica l'evento; gli altri campi sono valorizzati solo se
+// necessari per quel tipo di evento.
 type walEvent struct {
 	Type      string `json:"type"`
 	Timestamp string `json:"timestamp"`
@@ -92,8 +101,9 @@ type walEvent struct {
 
 // legacyWalRecord rappresenta il vecchio formato snapshot-based del WAL.
 //
-// Viene mantenuto solo per compatibilità con file wal.log già esistenti.
-// Le nuove scritture usano walEvent.
+// Viene mantenuto solo per compatibilità con file wal.log generati da versioni
+// precedenti del progetto. Le nuove scritture usano walEvent, che registra
+// eventi granulari invece di serializzare ogni volta lo stato completo.
 type legacyWalRecord struct {
 	Timestamp   string                  `json:"timestamp"`
 	NodeID      string                  `json:"node_id"`
@@ -109,11 +119,12 @@ type legacyWalRecord struct {
 	LastIncludedTerm  uint64 `json:"last_included_term"`
 }
 
-// Manager gestisce tutti i file persistenti di un singolo nodo.
+// Manager coordina le operazioni di persistenza di un singolo Consensus Node.
 //
-// Questa struct è il componente che sostituisce la logica di persistenza che
-// prima era dentro ConsensusNode. Il nodo usa Manager per salvare o caricare
-// lo stato, ma non si occupa direttamente di JSON, WAL o snapshot file.
+// Il ConsensusNode usa Manager per salvare e caricare stato persistente, WAL e
+// snapshot, senza conoscere i dettagli di serializzazione JSON o gestione file.
+// In Docker, i file gestiti da Manager risiedono su volumi persistenti, così lo
+// stato sopravvive al ciclo di vita dei container.
 type Manager struct {
 	nodeID       string
 	stateFile    string
@@ -123,13 +134,10 @@ type Manager struct {
 	lastState *State
 }
 
-// NewManager crea un nuovo manager di persistenza per un nodo.
+// NewManager crea un manager di persistenza per un nodo.
 //
-// dataDir deve essere la directory dati specifica del nodo, ad esempio:
-//
-//	data/node-1
-//
-// I file gestiti saranno:
+// dataDir indica la directory dati associata al nodo. Per ogni nodeID vengono
+// creati percorsi separati per state file, WAL e snapshot, ad esempio:
 //
 //	node-1_state.json
 //	node-1_wal.log
@@ -145,14 +153,14 @@ func NewManager(nodeID string, dataDir string) *Manager {
 
 // Save salva lo stato persistente del nodo.
 //
-// La scrittura segue questo ordine:
+// La scrittura segue due passaggi:
+//  1. calcola e appende al WAL gli eventi cambiati rispetto all'ultimo stato noto;
+//  2. aggiorna state.json come checkpoint compatto.
 //
-//  1. calcola gli eventi WAL rispetto all'ultimo stato noto;
-//  2. appende gli eventi al wal.log;
-//  3. aggiorna atomicamente state.json come checkpoint compatto.
-//
-// Il WAL non contiene più uno snapshot completo a ogni salvataggio, ma eventi
-// granulari. state.json rimane disponibile per recovery veloce.
+// Il WAL viene scritto prima del checkpoint compatto, seguendo il principio del
+// Write-Ahead Logging: le modifiche vengono registrate in modo append-only prima
+// di essere considerate stabilmente recuperabili. state.json serve invece a
+// velocizzare il recovery senza dover sempre rileggere l'intero WAL.
 func (m *Manager) Save(state State) error {
 	state = cloneState(state)
 
@@ -174,11 +182,13 @@ func (m *Manager) Save(state State) error {
 
 // Load carica lo stato persistente del nodo.
 //
-// L'ordine di recovery è:
-//
+// Il recovery segue un ordine semplice:
 //  1. prova a caricare state.json;
-//  2. se state.json non esiste, esegue il replay del WAL event-based;
-//  3. se non esiste nulla, restituisce found=false.
+//  2. se state.json non esiste, ricostruisce lo stato tramite replay del WAL;
+//  3. se non esiste nessun file persistente, restituisce found=false.
+//
+// Questo permette al nodo di ripartire rapidamente quando il checkpoint esiste,
+// ma mantiene comunque il WAL come fallback di recovery.
 func (m *Manager) Load() (State, bool, error) {
 	state, err := m.readStateFile()
 	if err == nil {
@@ -205,11 +215,14 @@ func (m *Manager) Load() (State, bool, error) {
 
 // SaveSnapshot salva uno snapshot locale della state machine.
 //
-// Lo snapshot viene scritto in modo atomico con il pattern:
-//
-//	write tmp -> rename
+// Lo snapshot viene scritto con il pattern write-to-temp-and-rename: prima viene
+// creato un file temporaneo, poi os.Rename sostituisce il file definitivo.
+// Questo riduce il rischio di lasciare snapshot parzialmente scritti in caso di
+// crash durante la scrittura.
 //
 // Dopo il salvataggio viene registrato anche un evento snapshot_saved nel WAL.
+// In questa versione lo snapshot abilita la compattazione logica dello stato,
+// ma non comporta la truncation fisica immediata del file wal.log.
 func (m *Manager) SaveSnapshot(snapshot Snapshot) error {
 	if snapshot.LastIncludedIndex == 0 {
 		return nil
@@ -239,10 +252,11 @@ func (m *Manager) SaveSnapshot(snapshot Snapshot) error {
 	return m.appendWALEvents([]walEvent{event})
 }
 
-// LoadSnapshot carica lo snapshot locale, se esiste.
+// LoadSnapshot carica lo snapshot locale, se presente.
 //
-// Se il file non esiste restituisce found=false.
-// Se esiste, restituisce lo snapshot caricato e found=true.
+// Restituisce found=false se il file non esiste. Quando lo snapshot viene
+// caricato correttamente, la mappa Data viene copiata per evitare che il chiamante
+// possa modificare direttamente lo stato interno della struttura caricata.
 func (m *Manager) LoadSnapshot() (Snapshot, bool, error) {
 	content, err := os.ReadFile(m.snapshotFile)
 	if err != nil {
@@ -265,9 +279,10 @@ func (m *Manager) LoadSnapshot() (Snapshot, bool, error) {
 
 // EncodeSnapshot serializza uno snapshot in JSON.
 //
-// Viene usata dal leader per inserire lo snapshot nel campo bytes della RPC
-// InstallSnapshot. La funzione vive nel package persistence perché conosce la
-// struttura persistente dello snapshot, ma non conosce la logica Raft.
+// Viene usata quando uno snapshot deve essere trasportato tramite RPC, ad esempio
+// durante InstallSnapshot o durante il download da parte del Backup Service.
+// La funzione vive nel package persistence perché conosce il formato persistente,
+// ma non contiene logica di consenso.
 func EncodeSnapshot(snapshot Snapshot) ([]byte, error) {
 	snapshot.Data = cloneData(snapshot.Data)
 
@@ -279,9 +294,10 @@ func EncodeSnapshot(snapshot Snapshot) ([]byte, error) {
 	return content, nil
 }
 
-// DecodeSnapshot deserializza uno snapshot ricevuto tramite InstallSnapshot.
+// DecodeSnapshot deserializza uno snapshot ricevuto come sequenza di byte.
 //
-// Viene usata dal follower quando riceve uno snapshot remoto dal leader.
+// Viene usata dai nodi che ricevono uno snapshot remoto. Restituisce errore se
+// il payload è vuoto o non rappresenta uno snapshot JSON valido.
 func DecodeSnapshot(data []byte) (Snapshot, error) {
 	if len(data) == 0 {
 		return Snapshot{}, fmt.Errorf("snapshot data cannot be empty")
@@ -297,6 +313,11 @@ func DecodeSnapshot(data []byte) (Snapshot, error) {
 	return snapshot, nil
 }
 
+// eventsFromState confronta lo stato corrente con l'ultimo stato salvato.
+//
+// Invece di riscrivere sempre tutto lo stato nel WAL, genera solo gli eventi
+// necessari a rappresentare le modifiche avvenute: cambio termine, voto,
+// append/truncation del log, commit index e last applied.
 func (m *Manager) eventsFromState(state State) []walEvent {
 	if m.lastState == nil {
 		return m.initialEvents(state)
@@ -334,6 +355,10 @@ func (m *Manager) eventsFromState(state State) []walEvent {
 	return events
 }
 
+// initialEvents genera gli eventi WAL necessari quando non esiste uno stato
+// precedente noto.
+//
+// Questo caso si verifica al primo salvataggio dopo l'avvio del Manager.
 func (m *Manager) initialEvents(state State) []walEvent {
 	events := make([]walEvent, 0)
 
@@ -378,6 +403,12 @@ func (m *Manager) initialEvents(state State) []walEvent {
 	return events
 }
 
+// logDeltaEvents calcola le modifiche tra il log precedente e quello corrente.
+//
+// Se il prefisso comune si interrompe, viene registrato un evento di truncation.
+// Le entry successive vengono poi registrate come append. Questo modello consente
+// di rappresentare sia la crescita del log sia eventuali correzioni dovute alla
+// replica.
 func (m *Manager) logDeltaEvents(previousLog []*consensuspb.LogEntry, currentLog []*consensuspb.LogEntry) []walEvent {
 	commonPrefixLength := commonLogPrefixLength(previousLog, currentLog)
 	events := make([]walEvent, 0)
@@ -444,6 +475,11 @@ func (m *Manager) newWALEvent(eventType string) walEvent {
 	}
 }
 
+// appendWALEvents aggiunge eventi al WAL in modalità append-only.
+//
+// Ogni evento viene codificato come una riga JSON indipendente. Il file fisico
+// non viene troncato in questa versione: la compattazione del WAL resta logica,
+// mentre la truncation fisica è una possibile evoluzione futura.
 func (m *Manager) appendWALEvents(events []walEvent) error {
 	if len(events) == 0 {
 		return nil
@@ -465,6 +501,11 @@ func (m *Manager) appendWALEvents(events []walEvent) error {
 	return nil
 }
 
+// writeStateFile scrive state.json in modo atomico.
+//
+// Il metodo usa un file temporaneo e poi os.Rename per sostituire il file
+// definitivo. Questo pattern evita, per quanto possibile, di lasciare un file
+// state.json corrotto o incompleto in caso di crash durante la scrittura.
 func (m *Manager) writeStateFile(state State) error {
 	content, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -497,6 +538,11 @@ func (m *Manager) readStateFile() (State, error) {
 	return cloneState(state), nil
 }
 
+// replayWAL ricostruisce lo stato persistente rileggendo il WAL.
+//
+// Viene usato come fallback quando state.json non è disponibile. Il replay
+// applica gli eventi nell'ordine in cui sono stati scritti, ricostruendo termine,
+// voto, log, commit index, last applied e stato snapshot-based.
 func (m *Manager) replayWAL() (State, error) {
 	file, err := os.Open(m.walFile)
 	if err != nil {
@@ -539,6 +585,11 @@ func (m *Manager) replayWAL() (State, error) {
 	return cloneState(state), nil
 }
 
+// applyWALEvent applica un singolo evento WAL allo stato ricostruito.
+//
+// Questa funzione è usata durante il replay del WAL e deve rimanere deterministica:
+// a parità di sequenza di eventi, il risultato del recovery deve essere sempre
+// lo stesso.
 func applyWALLine(state *State, line []byte) (bool, error) {
 	var event walEvent
 	if err := json.Unmarshal(line, &event); err != nil {

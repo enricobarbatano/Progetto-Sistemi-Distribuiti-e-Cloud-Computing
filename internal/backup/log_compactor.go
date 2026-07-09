@@ -12,12 +12,16 @@ import (
 	backuppb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/backuppb"
 )
 
+// LogCompactor invia la richiesta di compattazione del log ai nodi remoti dopo
+// un backup riuscito, senza dover gestire direttamente lo storage locale.
 type LogCompactor struct {
 	config   Config
 	client   *NodeClient
 	breakers *CircuitBreakerManager
 }
 
+// NewLogCompactor crea un compattatore pronto a inviare richieste di compaction
+// ai Consensus Node del cluster.
 func NewLogCompactor(config Config, client *NodeClient, breakers *CircuitBreakerManager) *LogCompactor {
 	return &LogCompactor{
 		config:   config,
@@ -26,6 +30,8 @@ func NewLogCompactor(config Config, client *NodeClient, breakers *CircuitBreaker
 	}
 }
 
+// Compact richiede la compattazione del log di un nodo fino a un indice
+// specifico, usando retry e Circuit Breaker per isolare nodi indisponibili.
 func (c *LogCompactor) Compact(ctx context.Context, address string, snapshotID string, upToIndex uint64) (*backuppb.CompactLogResponse, error) {
 	var lastErr error
 

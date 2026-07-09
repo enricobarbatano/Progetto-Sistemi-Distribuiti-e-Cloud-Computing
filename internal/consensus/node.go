@@ -1,23 +1,17 @@
-// Package consensus contiene la logica interna del Consensus Node.
+// Package consensus implementa la logica del nodo di consenso.
 //
-// Il package definisce un nodo di consenso stateful basato su una versione
-// incrementale del protocollo Raft. Il nodo espone sia le RPC interne di
-// consenso sia le RPC key-value usate dal client/proxy.
+// Il package contiene il cuore del sistema distribuito: elezione del leader,
+// replica del log, commit su quorum, persistenza dello stato e applicazione
+// delle entry committed alla state machine key-value.
 //
-// Questa versione include:
+// L'implementazione è basata su un protocollo con log replicato ispirato a Raft.
+// Il nodo può assumere i ruoli di follower, candidate o leader. Le scritture
+// vengono accettate dal leader e applicate solo dopo replica sulla maggioranza
+// del cluster, così da mantenere una semantica linearizzabile per le operazioni
+// completate.
 //
-//   - elezione del leader;
-//   - heartbeat periodici;
-//   - riuso delle connessioni gRPC verso i peer;
-//   - tracking peer online/offline;
-//   - persistenza su state.json e WAL event-based;
-//   - recovery robusto da state.json e fallback da replay WAL;
-//   - snapshot locale della state machine;
-//   - log compaction locale dopo snapshot;
-//   - ricostruzione della state machine applicando solo entry committed;
-//   - controllo di coerenza del log lato follower;
-//   - replicazione delle entry su quorum per Put e Delete;
-//   - letture Get servite solo dal leader per evitare letture stale.
+// Il package espone anche le RPC key-value e backup perché il ConsensusNode è
+// il componente che possiede materialmente log, state machine, WAL e snapshot.
 package consensus
 
 import (
@@ -40,23 +34,60 @@ import (
 
 const defaultSnapshotThreshold uint64 = 1000
 
+// ConsensusNode rappresenta un nodo stateful del cluster.
+//
+// Ogni nodo mantiene lo stato persistente richiesto dal protocollo di consenso:
+// termine corrente, voto espresso, log, commit index, last applied, snapshot e
+// state machine locale. Il nodo può cambiare ruolo durante l'esecuzione passando
+// tra follower, candidate e leader.
+//
+// La struct contiene anche i client gRPC verso i peer, lo stato online/offline
+// dei nodi remoti e i componenti locali di storage e persistenza. In questo modo
+// il nodo può coordinare consenso, replica e recovery senza delegare ad altri
+// servizi la responsabilità dello stato replicato.
 type ConsensusNode struct {
 	consensuspb.UnimplementedConsensusServiceServer
 	kvpb.UnimplementedKeyValueServiceServer
 	backuppb.UnimplementedBackupNodeServiceServer
+
+	// mu protegge lo stato interno del nodo.
+	//
+	// Le RPC gRPC possono arrivare in concorrenza: RequestVote, AppendEntries,
+	// Put/Get e InstallSnapshot possono accedere a termine, ruolo, log e commit
+	// index. Il mutex evita race condition e garantisce che ogni transizione di
+	// stato del nodo sia atomica dal punto di vista del processo locale.
 	mu sync.Mutex
 
+	// id identifica stabilmente il nodo nel cluster.
+	// address è l'indirizzo gRPC su cui il nodo è raggiungibile.
+	// peers contiene gli altri nodi del cluster, indicizzati per nodeID.
 	id      string
 	address string
 	peers   map[string]string
 
+	// currentTerm è il termine più alto osservato dal nodo.
+	// Cresce in modo monotono e funziona come clock logico per scartare messaggi
+	// obsoleti provenienti da termini precedenti.
 	currentTerm uint64
-	votedFor    string
-	log         []*consensuspb.LogEntry
 
+	// votedFor memorizza il candidato votato nel termine corrente.
+	// Serve a garantire che un nodo conceda al massimo un voto per termine.
+	votedFor string
+
+	// log contiene le entry replicate.
+	// Ogni entry rappresenta un comando della state machine, come PUT, DELETE o NOOP.
+	log []*consensuspb.LogEntry
+
+	// commitIndex è l'indice più alto noto come committed.
+	// Una entry diventa committed quando il leader la replica su un quorum.
 	commitIndex uint64
+
+	// lastApplied è l'indice più alto già applicato alla state machine locale.
+	//Può essere minore di commitIndex se ci sono entry committed non ancora applicate.
 	lastApplied uint64
-	role        consensuspb.NodeRole
+
+	//role rappresenta il ruolo corrente del nodo: follower, candidate o leader.
+	role consensuspb.NodeRole
 
 	// lastIncludedIndex e lastIncludedTerm rappresentano il prefisso del log
 	// già coperto dallo snapshot locale.
@@ -67,6 +98,9 @@ type ConsensusNode struct {
 	lastIncludedIndex uint64
 	lastIncludedTerm  uint64
 
+	// nextIndex indica, per ogni follower, la prossima entry che il leader proverà
+	// a inviare. matchIndex indica invece l'ultima entry che il leader sa essere
+	// replicata con successo su quel follower.
 	nextIndex  map[string]uint64
 	matchIndex map[string]uint64
 
@@ -93,11 +127,23 @@ type ConsensusNode struct {
 	leaderID      string
 	leaderAddress string
 
+	// peerConns e peerClients mantengono connessioni gRPC riutilizzabili verso i peer.
+	// Riutilizzare le connessioni evita di aprire un nuovo canale per ogni RPC.
 	peerConns   map[string]*grpc.ClientConn
 	peerClients map[string]consensuspb.ConsensusServiceClient
-	peerOnline  map[string]bool
+
+	// peerOnline traccia lo stato osservato dei peer.
+	// Questo campo non decide il consenso, ma aiuta logging, diagnostica e gestione
+	// di nodi temporaneamente non raggiungibili.
+	peerOnline map[string]bool
 }
 
+// NewConsensusNode inizializza un nuovo nodo di consenso.
+//
+// La funzione prepara lo stato in memoria, crea lo storage locale, inizializza
+// il manager di persistenza e prova a caricare eventuale stato precedente da
+// disco. Questo permette a un nodo di ripartire dopo un crash mantenendo termine,
+// voto, log, snapshot e state machine persistenti.
 func NewConsensusNode(id string, address string, peers map[string]string, dataDir string) (*ConsensusNode, error) {
 	if id == "" {
 		return nil, errors.New("node id cannot be empty")
@@ -133,7 +179,8 @@ func NewConsensusNode(id string, address string, peers map[string]string, dataDi
 		store: storage.NewKVStore(),
 
 		persistenceManager: persistence.NewManager(id, dataDir),
-		snapshotThreshold:  readUint64Env("SNAPSHOT_THRESHOLD", defaultSnapshotThreshold),
+
+		snapshotThreshold: readUint64Env("SNAPSHOT_THRESHOLD", defaultSnapshotThreshold),
 
 		electionResetCh: make(chan struct{}, 1),
 		stopCh:          make(chan struct{}),
@@ -159,6 +206,10 @@ func NewConsensusNode(id string, address string, peers map[string]string, dataDi
 	return node, nil
 }
 
+// readUint64Env legge una variabile d'ambiente uint64.
+// Viene usata per rendere configurabile la soglia di snapshot senza modificare
+// il codice. Se il valore non esiste, non è valido o è zero, viene usato il
+// default passato dal chiamante.
 func readUint64Env(key string, defaultValue uint64) uint64 {
 	value := os.Getenv(key)
 	if value == "" {
@@ -173,11 +224,19 @@ func readUint64Env(key string, defaultValue uint64) uint64 {
 	return parsed
 }
 
+// Start avvia i loop principali del nodo.
+//
+// Il loop di elezione gestisce timeout e transizioni a candidate; il loop degli
+// heartbeat invia periodicamente AppendEntries vuoti quando il nodo è leader.
 func (n *ConsensusNode) Start() {
 	go n.electionLoop()
 	go n.heartbeatLoop()
 }
 
+// Stop arresta il nodo e chiude le connessioni gRPC verso i peer.
+//
+// stopOnce garantisce che la chiusura avvenga una sola volta, evitando panic su
+// chiusure multiple del canale stopCh.
 func (n *ConsensusNode) Stop() {
 	n.stopOnce.Do(func() {
 		close(n.stopCh)

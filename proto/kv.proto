@@ -4,84 +4,113 @@ package kv;
 
 option go_package = "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/kvpb;kvpb";
 
-// KeyValueService espone le operazioni sullo storage chiave-valore.
-// Il Client Proxy userà queste RPC per parlare con il cluster di consenso.
+// KeyValueService espone le operazioni applicative dello storage key-value.
+//
+// Il servizio è implementato dai Consensus Node e viene usato dal Client Proxy.
+// Le scritture devono raggiungere il leader, mentre le risposte possono includere
+// leader_hint per aiutare il Proxy ad aggiornare il routing.
 service KeyValueService {
-  // Memorizza o aggiorna una coppia chiave-valore.
+  // Put inserisce o aggiorna una coppia chiave-valore.
   rpc Put(PutRequest) returns (PutResponse);
 
-  // Recupera il valore associato a una chiave.
+  // Get recupera il valore associato a una chiave.
   rpc Get(GetRequest) returns (GetResponse);
 
-  // Elimina una chiave dallo storage.
+  // Delete elimina una chiave dallo storage.
   rpc Delete(DeleteRequest) returns (DeleteResponse);
 
-  // Permette al Proxy di scoprire dinamicamente il leader corrente.
+  // GetLeader restituisce il leader noto dal nodo interrogato.
   rpc GetLeader(GetLeaderRequest) returns (GetLeaderResponse);
 }
 
-// Richiesta Put.
+// PutRequest rappresenta una richiesta di scrittura.
 message PutRequest {
+  // key è la chiave da inserire o aggiornare.
   string key = 1;
+
+  // value è il valore da associare alla chiave.
   string value = 2;
 
-  // Identificativo opzionale della richiesta.
-  // Utile per deduplicazione o logging.
+  // request_id identifica opzionalmente la richiesta.
+  // Può essere usato per logging, tracciamento o deduplicazione futura.
   string request_id = 3;
 }
 
-// Risposta Put.
+// PutResponse descrive l'esito di una richiesta Put.
 message PutResponse {
+  // success indica se la scrittura è stata accettata e committata.
   bool success = 1;
+
+  // error contiene un errore applicativo, se la scrittura fallisce.
   string error = 2;
 
-  // Se il nodo contattato non è leader, può suggerire il leader noto.
+  // leader_hint contiene l'indirizzo del leader noto.
+  // Il Proxy lo usa per aggiornare la cache quando contatta un follower.
   string leader_hint = 3;
 }
 
-// Richiesta Get.
+// GetRequest rappresenta una richiesta di lettura.
 message GetRequest {
+  // key è la chiave da leggere.
   string key = 1;
 
-  // Identificativo opzionale della richiesta.
-  // Utile per logging, tracciamento e futuri meccanismi Read-Index.
+  // request_id identifica opzionalmente la richiesta.
+  // Può essere usato per logging, tracciamento o ottimizzazioni future.
   string request_id = 2;
 }
 
-// Risposta Get.
+// GetResponse descrive l'esito di una richiesta Get.
 message GetResponse {
+  // found indica se la chiave è presente nello storage.
   bool found = 1;
+
+  // value contiene il valore associato alla chiave, se found è true.
   string value = 2;
+
+  // error contiene un errore applicativo, se la lettura non può essere servita.
   string error = 3;
 
-  // Se il nodo contattato non è leader, può suggerire il leader noto.
+  // leader_hint contiene l'indirizzo del leader noto.
+  // Il Proxy lo usa per aggiornare la cache quando contatta un follower.
   string leader_hint = 4;
 }
 
-// Richiesta Delete.
+// DeleteRequest rappresenta una richiesta di cancellazione.
 message DeleteRequest {
+  // key è la chiave da eliminare.
   string key = 1;
 
-  // Identificativo opzionale della richiesta.
+  // request_id identifica opzionalmente la richiesta.
   string request_id = 2;
 }
 
-// Risposta Delete.
+// DeleteResponse descrive l'esito di una richiesta Delete.
 message DeleteResponse {
+  // success indica se la cancellazione è stata accettata e committata.
   bool success = 1;
+
+  // error contiene un errore applicativo, se la cancellazione fallisce.
   string error = 2;
 
-  // Se il nodo contattato non è leader, può suggerire il leader noto.
+  // leader_hint contiene l'indirizzo del leader noto.
+  // Il Proxy lo usa per aggiornare la cache quando contatta un follower.
   string leader_hint = 3;
 }
 
-// Richiesta per conoscere il leader corrente.
+// GetLeaderRequest richiede informazioni sul leader noto dal nodo interrogato.
 message GetLeaderRequest {}
 
-// Risposta con informazioni sul leader.
+// GetLeaderResponse contiene le informazioni sul leader noto.
 message GetLeaderResponse {
+  // has_leader indica se il nodo conosce un leader valido.
   bool has_leader = 1;
+
+  // leader_id identifica il leader noto.
   string leader_id = 2;
+
+  // leader_address contiene l'indirizzo gRPC del leader.
   string leader_address = 3;
+
+  // term indica il termine associato all'informazione sul leader.
   uint64 term = 4;
 }

@@ -1,9 +1,13 @@
 # syntax=docker/dockerfile:1
 
+# Stage 1: compilazione del binario Go in un ambiente completo per ottenere
+# un eseguibile pronto per il runtime containerizzato.
 FROM golang:1.26.4-alpine AS builder
 
 WORKDIR /app
 
+# Installiamo git per permettere al modulo Go di risolvere eventuali dipendenze
+# che richiedono il download da repository remoti.
 RUN apk add --no-cache git
 
 COPY go.mod go.sum ./
@@ -11,16 +15,23 @@ RUN go mod download
 
 COPY . .
 
+# Compiliamo il consenso node in modalità statica per ottenere un binario
+# facilmente eseguibile nell'immagine finale, riducendo la dimensione del runtime.
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/consensus-node ./cmd/consensus-node
 
+# Stage 2: immagine finale leggera basata su Alpine per ridurre al minimo le
+# dimensioni e mantenere il runtime più sicuro ed efficiente.
 FROM alpine:3.24
 
 WORKDIR /app
 
+# Installa i certificati TLS necessari per eventuali connessioni di rete.
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /out/consensus-node /usr/local/bin/consensus-node
 
+# Espone la porta gRPC usata dai nodi del cluster per la comunicazione Raft.
 EXPOSE 50051
 
+# Impostiamo il comando di avvio del container con il binario compilato.
 ENTRYPOINT ["consensus-node"]

@@ -14,10 +14,13 @@ import (
 	backuppb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/backuppb"
 )
 
+// SnapshotSyncer salva gli snapshot ricevuti dai nodi in un percorso locale,
+// garantendo una scrittura atomica attraverso file temporanei e rename finale.
 type SnapshotSyncer struct {
 	backupDir string
 }
 
+// SnapshotFile descrive il risultato del salvataggio di uno snapshot sul disco.
 type SnapshotFile struct {
 	NodeID            string
 	SnapshotID        string
@@ -26,12 +29,16 @@ type SnapshotFile struct {
 	Path              string
 }
 
+// NewSnapshotSyncer crea un sincronizzatore che usa la directory indicata per
+// persistire i file di backup degli snapshot.
 func NewSnapshotSyncer(backupDir string) *SnapshotSyncer {
 	return &SnapshotSyncer{
 		backupDir: backupDir,
 	}
 }
 
+// SaveSnapshot riceve una risposta di download, valida il contenuto e scrive lo
+// snapshot sul disco locale con un nome derivato da nodo e snapshot ID.
 func (s *SnapshotSyncer) SaveSnapshot(resp *backuppb.DownloadSnapshotResponse) (SnapshotFile, error) {
 	if resp == nil {
 		return SnapshotFile{}, fmt.Errorf("download snapshot response cannot be nil")

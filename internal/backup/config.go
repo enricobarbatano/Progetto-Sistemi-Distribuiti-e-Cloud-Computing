@@ -24,6 +24,8 @@ const (
 	defaultCompactAfterRun = true
 )
 
+// Config raccoglie i parametri di esecuzione del Backup Service e viene
+// popolato a partire dalle variabili d'ambiente del processo.
 type Config struct {
 	ServiceID            string
 	Port                 string
@@ -36,6 +38,8 @@ type Config struct {
 	CompactAfterDownload bool
 }
 
+// LoadConfigFromEnv legge la configurazione del servizio dalle variabili
+// d'ambiente disponibili e restituisce una struttura Config pronta all'uso.
 func LoadConfigFromEnv() (Config, error) {
 	nodes := readStringListEnv("CONSENSUS_NODES")
 	if len(nodes) == 0 {

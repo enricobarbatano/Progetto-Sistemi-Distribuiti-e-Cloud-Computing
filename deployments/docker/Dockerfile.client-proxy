@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 
+# Stage 1: compilazione del binario Go in un ambiente dedicato al build.
 FROM golang:1.26.4-alpine AS builder
 
 WORKDIR /app
 
+# Git è necessario per risolvere dipendenze del modulo durante la build.
 RUN apk add --no-cache git
 
 COPY go.mod go.sum ./
@@ -11,17 +13,24 @@ RUN go mod download
 
 COPY . .
 
+# Compiliamo il client proxy in un eseguibile statico per il runtime finale.
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/client-proxy ./cmd/client-proxy
 
+# Stage 2: immagine runtime leggera basata su Alpine, ottimizzata per il deploy.
 FROM alpine:3.24
 
 WORKDIR /app
 
+# Installiamo ca-certificates e wget per supportare l'healthcheck di Docker
+# Compose e le connessioni HTTPS/HTTP del servizio.
 RUN apk add --no-cache ca-certificates wget
 
 COPY --from=builder /out/client-proxy /usr/local/bin/client-proxy
 
+# Espone la porta gRPC del proxy verso i client esterni e la porta HTTP usata
+# dall'endpoint di healthcheck.
 EXPOSE 8080
 EXPOSE 8081
 
+# Impostiamo il punto di ingresso del container con il binario del proxy.
 ENTRYPOINT ["client-proxy"]

@@ -1,13 +1,13 @@
-// Package consensus contiene la logica del protocollo di consenso.
+// Package consensus contiene anche la replica del log.
 //
-// Questo file raccoglie la parte di Raft relativa alla replicazione del log:
-// heartbeat del leader, AppendEntries, replica verso i peer, raggiungimento
-// del quorum e gestione delle scritture Put/Delete dopo il commit.
+// Questo file raccoglie la parte del protocollo relativa a heartbeat,
+// AppendEntries, replica delle entry verso i follower, commit su quorum e
+// invio di snapshot ai follower troppo arretrati.
 //
-// Questa versione include:
-//   - fast back-off dei conflitti tramite conflict_index/conflict_term;
-//   - invio InstallSnapshot quando un follower è troppo indietro rispetto al
-//     log compattato del leader.
+// Una scrittura Put/Delete diventa visibile alla state machine solo dopo che il
+// leader l'ha replicata su una maggioranza del cluster. Questo è il punto in cui
+// il sistema collega la replica del log alla linearizzabilità delle operazioni
+// completate.
 package consensus
 
 import (
@@ -19,7 +19,11 @@ import (
 	"github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/internal/persistence"
 )
 
-// appendEntriesFromLeaderLocked appende al log locale le entry ricevute dal leader.
+// appendEntriesFromLeaderLocked integra nel log locale le entry ricevute dal leader.
+//
+// Se un'entry in arrivo ha lo stesso indice ma termine diverso da quella locale,
+// il follower tronca il log dal punto di conflitto e accetta il suffix del leader.
+// Questa regola mantiene i log dei follower allineati al leader corrente.
 func (n *ConsensusNode) appendEntriesFromLeaderLocked(entries []*consensuspb.LogEntry) bool {
 	if len(entries) == 0 {
 		return false
@@ -46,7 +50,11 @@ func (n *ConsensusNode) appendEntriesFromLeaderLocked(entries []*consensuspb.Log
 	return false
 }
 
-// entriesFromIndexLocked restituisce tutte le entry del log a partire da index.
+// entriesFromIndexLocked restituisce le entry a partire da index.
+//
+// Se index è già coperto dallo snapshot locale, la ricerca parte dalla prima
+// entry non inclusa nello snapshot. Questo evita di richiedere entry che non
+// esistono più nel log in memoria dopo la compattazione logica.
 func (n *ConsensusNode) entriesFromIndexLocked(index uint64) []*consensuspb.LogEntry {
 	if index <= n.lastIncludedIndex {
 		index = n.lastIncludedIndex + 1
@@ -63,6 +71,10 @@ func (n *ConsensusNode) entriesFromIndexLocked(index uint64) []*consensuspb.LogE
 }
 
 // heartbeatLoop invia heartbeat periodici quando il nodo è leader.
+//
+// Gli heartbeat sono AppendEntries vuoti: non replicano nuove operazioni, ma
+// mantengono l'autorità del leader e impediscono ai follower di avviare elezioni
+// inutili finché il leader è raggiungibile.
 func (n *ConsensusNode) heartbeatLoop() {
 	ticker := time.NewTicker(n.heartbeatInterval)
 	defer ticker.Stop()
@@ -84,7 +96,11 @@ func (n *ConsensusNode) heartbeatLoop() {
 	}
 }
 
-// sendHeartbeats invia AppendEntries vuote a tutti i peer.
+// sendHeartbeats invia AppendEntries vuoti a tutti i peer.
+//
+// Oltre a mantenere viva la leadership, le risposte degli heartbeat permettono
+// al leader di osservare termini più recenti e fare step-down se un altro nodo
+// ha già avanzato il termine.
 func (n *ConsensusNode) sendHeartbeats() {
 	n.mu.Lock()
 
@@ -156,10 +172,14 @@ func (n *ConsensusNode) sendHeartbeats() {
 	}
 }
 
-// replicateLogToPeer prova a replicare il log verso un singolo follower.
+// replicateLogToPeer prova a portare un follower almeno fino a targetIndex.
 //
-// Se il follower è troppo indietro e le entry necessarie sono già state
-// compattate, il leader invia prima lo snapshot tramite InstallSnapshot.
+// Il leader usa nextIndex e matchIndex per decidere quali entry inviare. Se il
+// follower è troppo indietro e le entry necessarie sono già incluse nello
+// snapshot locale, il leader invia InstallSnapshot prima di riprendere la replica.
+//
+// La funzione restituisce true solo quando il follower conferma di avere almeno
+// targetIndex.
 func (n *ConsensusNode) replicateLogToPeer(ctx context.Context, peerID string, peerAddress string, targetIndex uint64) bool {
 	for {
 		select {
@@ -255,9 +275,10 @@ func (n *ConsensusNode) replicateLogToPeer(ctx context.Context, peerID string, p
 
 // sendSnapshotToPeer invia lo snapshot locale a un follower troppo arretrato.
 //
-// In questa prima versione lo snapshot viene inviato in un unico chunk.
-// Il proto supporta offset/data/done, quindi in futuro potremo spezzarlo in
-// più blocchi senza cambiare contratto.
+// Questo caso si verifica quando il follower richiede entry che il leader ha già
+// compattato logicamente nello snapshot. In questa versione lo snapshot viene
+// inviato in un unico chunk; il proto contiene comunque offset/data/done, quindi
+// il trasferimento potrà essere spezzato in blocchi in una versione futura.
 func (n *ConsensusNode) sendSnapshotToPeer(ctx context.Context, peerID string, peerAddress string) bool {
 	n.mu.Lock()
 
@@ -338,7 +359,12 @@ func (n *ConsensusNode) sendSnapshotToPeer(ctx context.Context, peerID string, p
 	return true
 }
 
-// replicateEntryToQuorum replica una specifica entry fino al quorum.
+// replicateEntryToQuorum replica una entry fino alla maggioranza del cluster.
+//
+// Il leader conta sé stesso come prima replica valida e invia la entry ai peer.
+// La scrittura viene considerata sicura solo quando replicatedCount raggiunge
+// majority(), cioè N/2 + 1. Questo impedisce che una scrittura confermata venga
+// persa se il leader crasha subito dopo il commit.
 func (n *ConsensusNode) replicateEntryToQuorum(ctx context.Context, entryIndex uint64) bool {
 	n.mu.Lock()
 
@@ -388,6 +414,13 @@ func (n *ConsensusNode) replicateEntryToQuorum(ctx context.Context, entryIndex u
 }
 
 // handleWriteOperation gestisce una scrittura Put/Delete sul leader.
+//
+// Se il nodo non è leader, restituisce errore e leader hint al chiamante. Se è
+// leader, crea una nuova LogEntry, la persiste, la replica fino al quorum e solo
+// dopo aggiorna commitIndex e applica l'entry alla state machine.
+//
+// Questo ordine è centrale per la correttezza: una scrittura viene resa visibile
+// solo dopo essere stata replicata sulla maggioranza.
 func (n *ConsensusNode) handleWriteOperation(ctx context.Context, operation consensuspb.LogOperation, key string, value string) (bool, string, string, error) {
 	n.mu.Lock()
 
@@ -449,6 +482,15 @@ func (n *ConsensusNode) handleWriteOperation(ctx context.Context, operation cons
 }
 
 // AppendEntries gestisce heartbeat e replica log dal leader verso un follower.
+//
+// La RPC svolge due funzioni:
+//   - heartbeat, quando Entries è vuoto;
+//   - replica effettiva, quando contiene nuove LogEntry.
+//
+// Il follower accetta la richiesta solo se il termine è valido e se prevLogIndex
+// e prevLogTerm sono coerenti con il proprio log o con il bordo dello snapshot.
+// In caso di conflitto, restituisce informazioni utili al leader per ridurre
+// rapidamente nextIndex.
 func (n *ConsensusNode) AppendEntries(ctx context.Context, req *consensuspb.AppendEntriesRequest) (*consensuspb.AppendEntriesResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -464,7 +506,7 @@ func (n *ConsensusNode) AppendEntries(ctx context.Context, req *consensuspb.Appe
 	}
 
 	stateChanged := false
-
+	// Messaggi provenienti da termini vecchi vengono rifiutati.
 	if req.Term > n.currentTerm {
 		n.currentTerm = req.Term
 		n.votedFor = ""
@@ -497,7 +539,8 @@ func (n *ConsensusNode) AppendEntries(ctx context.Context, req *consensuspb.Appe
 			ConflictTerm:  n.lastIncludedTerm,
 		}, nil
 	}
-
+	// Regola di coerenza del log: il follower accetta nuove entry solo se il
+	// prefisso indicato dal leader coincide con il proprio log locale.
 	if !n.hasLogEntryLocked(req.PrevLogIndex, req.PrevLogTerm) {
 		conflictIndex, conflictTerm := n.conflictInfoLocked(req.PrevLogIndex)
 
@@ -522,6 +565,8 @@ func (n *ConsensusNode) AppendEntries(ctx context.Context, req *consensuspb.Appe
 		stateChanged = true
 	}
 
+	// Il follower avanza il commit index seguendo il leader e applica alla state
+	// machine tutte le entry che diventano committed.
 	if req.LeaderCommit > n.commitIndex {
 		lastIndex := n.lastLogIndexLocked()
 
@@ -575,7 +620,11 @@ func (n *ConsensusNode) nextIndexForPeerLocked(peerID string) uint64 {
 	return nextIndex
 }
 
-// updateNextIndexFromConflictLocked applica il fast back-off sul nextIndex.
+// updateNextIndexFromConflictLocked aggiorna nextIndex dopo un rifiuto.
+//
+// Usa le informazioni di conflitto restituite dal follower per fare fast back-off
+// invece di decrementare nextIndex una posizione alla volta. Questo riduce il
+// numero di round RPC necessari per riallineare log divergenti.
 func (n *ConsensusNode) updateNextIndexFromConflictLocked(peerID string, resp *consensuspb.AppendEntriesResponse) {
 	nextIndex := n.nextIndex[peerID]
 	if nextIndex == 0 {
@@ -603,7 +652,11 @@ func (n *ConsensusNode) updateNextIndexFromConflictLocked(peerID string, resp *c
 	n.nextIndex[peerID] = nextIndex
 }
 
-// conflictInfoLocked calcola le informazioni di conflitto da restituire al leader.
+// conflictInfoLocked calcola le informazioni di conflitto per il leader.
+//
+// Quando AppendEntries fallisce per incoerenza del log, il follower restituisce
+// il primo indice del termine in conflitto. Il leader usa queste informazioni
+// per aggiornare nextIndex in modo più efficiente.
 func (n *ConsensusNode) conflictInfoLocked(prevLogIndex uint64) (uint64, uint64) {
 	if prevLogIndex > n.lastLogIndexLocked() {
 		return n.lastLogIndexLocked() + 1, 0
@@ -648,7 +701,11 @@ func (n *ConsensusNode) lastIndexForTermLocked(term uint64) (uint64, bool) {
 	return lastIndex, found
 }
 
-// stepDownToTermLocked porta il nodo a follower per un termine più alto.
+// stepDownToTermLocked forza il nodo a diventare follower in un termine più alto.
+//
+// Un nodo che osserva un termine maggiore perde immediatamente eventuale ruolo di
+// leader o candidate. Questo evita che un leader obsoleto continui a servire
+// richieste dopo la presenza di un termine più recente.
 func (n *ConsensusNode) stepDownToTermLocked(term uint64) {
 	n.currentTerm = term
 	n.votedFor = ""
@@ -660,11 +717,12 @@ func (n *ConsensusNode) stepDownToTermLocked(term uint64) {
 // confirmLeadershipWithQuorum verifica che il leader abbia ancora contatto con
 // la maggioranza del cluster prima di servire una lettura.
 //
-// Questa è una versione semplificata del meccanismo Read-Index: invece di
+// Questa è una versione semplificata del meccanismo ReadIndex: invece di
 // introdurre una nuova RPC, il leader invia AppendEntries vuoti ai peer e conta
-// le risposte valide. Se raggiunge la maggioranza, può rispondere alla Get.
+// le risposte valide. Se raggiunge la maggioranza nello stesso termine, può
+// rispondere alla Get riducendo il rischio di letture stale.
 //
-// Il nodo leader conta sé stesso come primo voto valido.
+// Il nodo leader conta sé stesso come prima conferma valida.
 func (n *ConsensusNode) confirmLeadershipWithQuorum(ctx context.Context) bool {
 	n.mu.Lock()
 
@@ -728,7 +786,7 @@ func (n *ConsensusNode) confirmLeadershipWithQuorum(ctx context.Context) bool {
 //
 // Se il peer risponde con un termine maggiore, il nodo corrente perde la
 // leadership e passa a follower. Se il peer accetta l'heartbeat nello stesso
-// termine, la risposta conta come conferma di quorum.
+// termine, la risposta conta come conferma valida per la lettura linearizzabile.
 func (n *ConsensusNode) confirmLeadershipWithPeer(ctx context.Context, peerID string, peerAddress string, term uint64, leaderID string, leaderCommit uint64) bool {
 	n.mu.Lock()
 

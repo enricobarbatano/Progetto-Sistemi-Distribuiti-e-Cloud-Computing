@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Calcola e plotta il throughput dai CSV raw di scalabilità.
 

@@ -1,17 +1,16 @@
-// Package proxy contiene la logica interna del Client Proxy Service.
+// Package proxy implementa il Client Proxy Service.
 //
-// Questo file contiene Router, il componente che decide verso quale Consensus
-// Node inoltrare una richiesta.
+// Il Proxy è il punto di ingresso stateless per i client esterni. Non mantiene
+// dati applicativi e non partecipa al protocollo di consenso: il suo compito è
+// instradare Put, Get, Delete e GetLeader verso il Consensus Node corretto.
 //
-// Router coordina:
-//   - Config, per conoscere seed nodes, timeout, retry e backoff;
-//   - LeaderCache, per ricordare il leader noto;
-//   - NodeClient, per eseguire chiamate gRPC verso i nodi;
-//   - CircuitBreakerManager, per evitare chiamate ripetute verso nodi guasti.
+// Il package implementa Client-side Service Discovery: il leader non è
+// configurato staticamente nel client, ma viene scoperto dinamicamente dal Proxy
+// interrogando i nodi o usando i leader_hint restituiti dai follower.
 //
-// Router non espone direttamente un server gRPC: quello sarà responsabilità
-// di service.go. Router non salva dati applicativi: resta stateless rispetto
-// alla key-value map del cluster.
+// Il package integra inoltre retry, backoff e Circuit Breaker per evitare che
+// nodi non disponibili causino cascading failure o degradino l'intero sistema.
+
 package proxy
 
 import (
@@ -24,14 +23,29 @@ import (
 	kvpb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/kvpb"
 )
 
-// Router instrada le richieste client verso il leader del cluster.
+// Router coordina l'instradamento delle richieste client verso il cluster.
 //
-// Il Router mantiene solo stato operativo leggero, come la cache del leader.
-// Non contiene dati applicativi e non partecipa al consenso Raft.
+// Il Router mantiene solo stato operativo temporaneo, come la cache del leader,
+// e non contiene dati applicativi key-value. La sua responsabilità è rendere il
+// cluster trasparente al client: il client invia sempre le richieste al Proxy,
+// mentre il Router decide a quale Consensus Node inoltrarle.
+//
+// Il Router combina tre meccanismi: cache del leader, Client-side Service
+// Discovery e Circuit Breaker per nodo.
+
 type Router struct {
-	config   Config
-	cache    *LeaderCache
-	client   *NodeClient
+	config Config
+
+	// leaderCache conserva l'ultimo leader noto.
+	//
+	// La cache evita di eseguire una discovery completa a ogni richiesta. Viene
+	// aggiornata tramite GetLeader o tramite leader_hint restituiti dai follower.
+	cache  *LeaderCache
+	client *NodeClient
+	// cbManager contiene un Circuit Breaker indipendente per ogni nodo.
+	//
+	// In questo modo il fallimento di un singolo nodo non blocca le richieste verso
+	// gli altri peer disponibili.
 	breakers *CircuitBreakerManager
 }
 
@@ -48,11 +62,14 @@ func NewRouter(config Config, cache *LeaderCache, client *NodeClient, breakers *
 	}
 }
 
-// DiscoverLeader interroga i seed nodes finché non trova un leader noto.
+// discoverLeader cerca il leader corrente interrogando i nodi conosciuti.
 //
-// Se un nodo risponde con has_leader=true, il Router aggiorna la LeaderCache e
-// restituisce le informazioni del leader. Le chiamate sono protette dal Circuit
-// Breaker del nodo interrogato.
+// Questa funzione viene usata quando la cache del leader è vuota, scaduta o
+// ritenuta non più valida dopo un errore. Il primo nodo che dichiara un leader
+// valido permette al Router di aggiornare la cache.
+//
+// La discovery è client-side perché avviene dentro il Proxy, non tramite un
+// servizio esterno di registrazione.
 func (r *Router) DiscoverLeader(ctx context.Context) (LeaderInfo, error) {
 	var lastErr error
 
@@ -97,10 +114,14 @@ func (r *Router) LeaderInfo(ctx context.Context) (LeaderInfo, error) {
 	return r.leaderOrDiscover(ctx)
 }
 
-// Put inoltra una richiesta Put al leader corrente.
+// Put inoltra una richiesta di scrittura al leader del cluster.
 //
-// Se il leader non è noto, lo scopre con DiscoverLeader.
-// Se la risposta contiene leader_hint, aggiorna la cache e ritenta.
+// Il Proxy non applica direttamente la scrittura e non modifica alcuno stato
+// key-value locale. La richiesta viene inoltrata al Consensus Node leader, che
+// la inserisce nel log e la conferma solo dopo replica su quorum.
+//
+// Se il nodo contattato non è leader, il leader_hint restituito viene usato per
+// aggiornare la cache e riprovare verso il nodo corretto.
 func (r *Router) Put(ctx context.Context, key string, value string) (*kvpb.PutResponse, error) {
 	var lastResp *kvpb.PutResponse
 	var lastErr error
@@ -153,10 +174,11 @@ func (r *Router) Put(ctx context.Context, key string, value string) (*kvpb.PutRe
 	return nil, lastErr
 }
 
-// Get inoltra una richiesta Get al leader corrente.
+// Get inoltra una richiesta di lettura al leader del cluster.
 //
-// Anche le letture passano dal leader, perché il cluster attuale non serve
-// letture dai follower per evitare dati stale.
+// Anche le letture passano dal leader, così il sistema evita di servire valori
+// obsoleti da follower non aggiornati. Il Proxy mantiene trasparente questa
+// scelta al client, che continua a usare un singolo endpoint.
 func (r *Router) Get(ctx context.Context, key string) (*kvpb.GetResponse, error) {
 	var lastResp *kvpb.GetResponse
 	var lastErr error
@@ -209,10 +231,10 @@ func (r *Router) Get(ctx context.Context, key string) (*kvpb.GetResponse, error)
 	return nil, lastErr
 }
 
-// Delete inoltra una richiesta Delete al leader corrente.
+// Delete inoltra una richiesta di cancellazione al leader del cluster.
 //
-// Come Put, Delete viene accettata solo dal leader e confermata dal cluster
-// dopo replica su quorum.
+// Come Put, anche Delete è una scrittura logica: viene serializzata come entry
+// del log dal leader e diventa visibile solo dopo commit su quorum.
 func (r *Router) Delete(ctx context.Context, key string) (*kvpb.DeleteResponse, error) {
 	var lastResp *kvpb.DeleteResponse
 	var lastErr error

@@ -1,32 +1,31 @@
-// Package proxy contiene la logica interna del Client Proxy Service.
-//
 // Questo file contiene la cache thread-safe del leader conosciuto dal Proxy.
-// La cache non effettua chiamate gRPC e non decide da sola chi sia il leader:
-// viene aggiornata dal Router quando una chiamata GetLeader ha successo oppure
-// quando un follower restituisce un leader_hint.
+//
+// La cache è un'ottimizzazione della Client-side Service Discovery: consente al
+// Proxy di riutilizzare l'ultimo leader noto invece di interrogare tutti i nodi
+// a ogni richiesta. La cache non è una fonte di verità permanente e può essere
+// invalidata dopo errori, cambio di leader o leader_hint ricevuti dai follower.
+
 package proxy
 
 import "sync"
 
-// LeaderInfo rappresenta il leader noto al Proxy.
+// LeaderInfo descrive il leader conosciuto dal Proxy.
 //
-// Address è l'informazione necessaria per il routing.
-// ID e Term migliorano osservabilità e debug, perché permettono al Proxy di
-// restituire una risposta GetLeader più completa al client.
+// Include identificativo del nodo, indirizzo gRPC e termine associato. Il
+// termine aiuta a distinguere informazioni recenti da informazioni
+// potenzialmente obsolete dopo una nuova elezione.
+
 type LeaderInfo struct {
 	ID      string
 	Address string
 	Term    uint64
 }
 
-// LeaderCache mantiene il leader attualmente conosciuto.
+// LeaderCache memorizza in modo thread-safe l'ultimo leader noto.
 //
-// gRPC gestisce le richieste in goroutine separate, quindi più client possono
-// arrivare contemporaneamente al Proxy. Per questo motivo l'accesso alla cache
-// deve essere protetto da mutex.
-//
-// Questa struct non contiene logica di discovery: conserva solo il risultato
-// più recente scoperto da altri componenti.
+// Il Proxy può servire più richieste concorrenti; per questo l'accesso alla
+// cache è protetto da mutex. La cache non è una fonte di verità definitiva:
+// può essere invalidata o aggiornata tramite GetLeader e leader_hint.
 type LeaderCache struct {
 	mu     sync.RWMutex
 	leader LeaderInfo
@@ -40,10 +39,10 @@ func NewLeaderCache() *LeaderCache {
 	return &LeaderCache{}
 }
 
-// Get restituisce il leader noto.
+// Get restituisce il leader attualmente memorizzato nella cache.
 //
-// Il secondo valore di ritorno indica se il leader è presente.
-// Se non è ancora stato scoperto, found sarà false.
+// Se la cache è vuota, found=false indica al Router che deve eseguire una
+// discovery completa.
 func (c *LeaderCache) Get() (LeaderInfo, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -55,10 +54,10 @@ func (c *LeaderCache) Get() (LeaderInfo, bool) {
 	return c.leader, true
 }
 
-// Set aggiorna il leader noto.
+// Set aggiorna la cache con un nuovo leader noto.
 //
-// Se viene passato un indirizzo vuoto, la funzione non modifica la cache.
-// Questo evita di cancellare accidentalmente un leader valido con un hint vuoto.
+// Viene chiamato dopo una discovery riuscita o dopo aver ricevuto un leader_hint
+// da un follower.
 func (c *LeaderCache) Set(leader LeaderInfo) {
 	if leader.Address == "" {
 		return
@@ -70,10 +69,11 @@ func (c *LeaderCache) Set(leader LeaderInfo) {
 	c.leader = leader
 }
 
-// Clear rimuove il leader attualmente noto.
+// Clear invalida la cache del leader.
 //
-// Viene usata quando il Proxy rileva che il leader in cache non è più
-// raggiungibile o non è più leader.
+// Viene usato quando il leader memorizzato non risponde più, rifiuta la richiesta
+// o sembra non essere più valido. La richiesta successiva dovrà eseguire una
+// nuova discovery.
 func (c *LeaderCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

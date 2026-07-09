@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Genera grafici dai risultati del Backup Service.
 

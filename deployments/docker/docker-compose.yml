@@ -1,24 +1,37 @@
 services:
+  # Primo nodo del cluster Raft. Usa il Dockerfile dei consensus node e riceve
+  # una configurazione dedicata per partecipare all'elezione del leader.
   node-1:
     build:
       context: ../..
       dockerfile: deployments/docker/Dockerfile.consensus-node
     container_name: sdcc-node-1
     environment:
+      # Identifica il nodo all'interno del cluster e ne definisce l'indirizzo
+      # raggiungibile dagli altri container nella rete Docker.
       NODE_ID: node-1
       NODE_ADDRESS: node-1:50051
       PORT: "50051"
       DATA_DIR: /data
+      # PEERS definisce la vista dei vicini del nodo, fondamentale per la
+      # comunicazione Raft e per l'elezione del leader.
       PEERS: node-2=node-2:50051,node-3=node-3:50051
+      # SNAPSHOT_THRESHOLD regola la frequenza con cui il nodo crea snapshot e
+      # compatta il log locale.
       SNAPSHOT_THRESHOLD: "5"
+    # Il volume garantisce la persistenza di WAL, snapshot e stato del nodo anche
+    # dopo riavvii o ricreazione del container.
     volumes:
       - node1-data:/data
     ports:
       - "50051:50051"
+    # La policy di restart mantiene il servizio disponibile in caso di crash.
     restart: unless-stopped
     networks:
       - sdcc-net
 
+  # Secondo nodo del cluster, configurato con una vista dei peer differente per
+  # consentire la replicazione e la tolleranza ai guasti.
   node-2:
     build:
       context: ../..
@@ -39,6 +52,7 @@ services:
     networks:
       - sdcc-net
 
+  # Terzo nodo del cluster, aggiunto per aumentare la ridondanza del sistema.
   node-3:
     build:
       context: ../..
@@ -59,14 +73,20 @@ services:
     networks:
       - sdcc-net
 
+  # Proxy che espone un punto di accesso unico al cluster e instrada le richieste
+  # verso il leader corrente tramite la rete bridge dedicata.
   client-proxy:
     build:
       context: ../..
       dockerfile: deployments/docker/Dockerfile.client-proxy
     container_name: sdcc-client-proxy
     environment:
+      # Porta gRPC del proxy esposta ai client esterni.
       PROXY_PORT: "8080"
+      # Porta HTTP usata per il health endpoint del servizio.
       PROXY_HEALTH_PORT: "8081"
+      # Gli hostname Docker permettono al proxy di contattare i nodi tramite nome
+      # del servizio, senza dipendere da IP statici o configurazioni host.
       CONSENSUS_NODES: node-1:50051,node-2:50051,node-3:50051
       RPC_TIMEOUT_MS: "800"
       MAX_RETRIES: "3"
@@ -80,6 +100,8 @@ services:
       - node-1
       - node-2
       - node-3
+    # Healthcheck del proxy usato da Docker Compose per verificare che il
+    # servizio sia effettivamente pronto prima di proseguire con l'orchestrazione.
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
       interval: 10s
@@ -90,14 +112,17 @@ services:
     networks:
       - sdcc-net
 
+  # Backup service amministrativo che coordina snapshot e compattazione remota.
   backup-service:
     build:
       context: ../..
       dockerfile: deployments/docker/Dockerfile.backup-service
     container_name: sdcc-backup-service
     environment:
+      # Porta gRPC del servizio di backup esposta all'esterno.
       BACKUP_PORT: "9090"
       BACKUP_SERVICE_ID: backup-service-1
+      # Anche il backup service usa gli hostname Docker per raggiungere i nodi.
       CONSENSUS_NODES: node-1:50051,node-2:50051,node-3:50051
       BACKUP_DIR: /backup-data
       RPC_TIMEOUT_MS: "1000"
@@ -105,6 +130,8 @@ services:
       BACKOFF_MS: "200"
       BACKUP_INTERVAL_MS: "0"
       COMPACT_AFTER_DOWNLOAD: "true"
+    # Il volume mantiene gli snapshot scaricati anche oltre il ciclo di vita del
+    # container, consentendo backup persistenti e riavvii sicuri.
     volumes:
       - backup-data:/backup-data
     ports:
@@ -117,10 +144,13 @@ services:
     networks:
       - sdcc-net
 
+# Rete bridge dedicata per consentire ai container di comunicare tra loro tramite
+# hostname del servizio, senza dover configurare IP statici o mapping manuali.
 networks:
   sdcc-net:
     driver: bridge
 
+# Volumi persistenti per lo stato dei nodi e per i backup scaricati dal service.
 volumes:
   node1-data:
   node2-data:

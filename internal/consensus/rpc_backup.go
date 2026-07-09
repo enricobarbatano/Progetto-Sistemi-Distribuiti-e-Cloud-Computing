@@ -1,14 +1,13 @@
-// Package consensus contiene la logica del protocollo di consenso.
+// Package consensus contiene anche le RPC amministrative esposte al Backup Service.
 //
-// Questo file contiene le RPC che ogni Consensus Node espone al Backup Service.
+// Questo file definisce le operazioni che un singolo Consensus Node rende
+// disponibili per snapshot, download e compattazione logica.
 //
-// Il Backup Service non deve accedere direttamente allo stato interno del nodo.
-// Per questo motivo il nodo espone operazioni esplicite per:
-//   - forzare la creazione di uno snapshot locale;
-//   - scaricare lo snapshot locale;
-//   - richiedere la compattazione del log fino a un certo indice.
-//
-// Queste RPC sono operative sul singolo nodo, non orchestrano l'intero cluster.
+// Il Backup Service non accede direttamente ai campi interni del nodo: usa RPC
+// esplicite per forzare snapshot, scaricare lo stato e richiedere compattazione.
+// Queste RPC operano sul singolo nodo; l'orchestrazione dell'intero backup del
+// cluster rimane nel package internal/backup.
+
 package consensus
 
 import (
@@ -22,9 +21,11 @@ import (
 // TriggerSnapshot forza il nodo a creare uno snapshot locale.
 //
 // Lo snapshot viene creato solo se esiste almeno una entry applicata alla state
-// machine. Dopo la creazione dello snapshot, il nodo salva anche lo stato
-// persistente, così state.json resta coerente con lastIncludedIndex e
+// machine. Dopo il salvataggio dello snapshot, il nodo persiste anche lo stato
+// corrente, così state.json resta coerente con lastIncludedIndex e
 // lastIncludedTerm.
+//
+// Questa RPC è usata dal Backup Service prima di scaricare lo stato del nodo.
 func (n *ConsensusNode) TriggerSnapshot(ctx context.Context, req *backuppb.TriggerSnapshotRequest) (*backuppb.TriggerSnapshotResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -71,9 +72,11 @@ func (n *ConsensusNode) TriggerSnapshot(ctx context.Context, req *backuppb.Trigg
 
 // DownloadSnapshot restituisce lo snapshot locale più recente del nodo.
 //
-// Se snapshot_id è vuoto, viene restituito l'ultimo snapshot disponibile.
-// In questa fase non manteniamo ancora uno storico di più snapshot per nodo:
-// il file snapshot.json rappresenta sempre l'ultimo checkpoint locale.
+// Se SnapshotId è vuoto, viene restituito l'ultimo snapshot disponibile. In
+// questa versione il nodo mantiene un solo snapshot locale corrente:
+// snapshot.json rappresenta l'ultimo checkpoint della state machine.
+//
+// Il payload restituito è lo snapshot serializzato dal package persistence.
 func (n *ConsensusNode) DownloadSnapshot(ctx context.Context, req *backuppb.DownloadSnapshotRequest) (*backuppb.DownloadSnapshotResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -116,11 +119,14 @@ func (n *ConsensusNode) DownloadSnapshot(ctx context.Context, req *backuppb.Down
 	}, nil
 }
 
-// CompactLog compatta il log locale fino all'indice richiesto.
+// CompactLog applica la compattazione logica del log locale fino all'indice richiesto.
 //
-// Per sicurezza il nodo permette la compattazione remota solo fino all'indice
-// già coperto dal proprio snapshot locale. Questo evita di eliminare entry non
-// ancora rappresentate in modo sicuro da uno snapshot.
+// Per sicurezza, il nodo accetta la compattazione solo fino a un indice già
+// coperto dallo snapshot locale. Questo evita di eliminare entry che non sono
+// ancora rappresentate in modo sicuro da un checkpoint.
+//
+// Nota: la compattazione è logica. Il log in memoria può essere ridotto, ma il
+// file WAL fisico resta append-only in questa versione.
 func (n *ConsensusNode) CompactLog(ctx context.Context, req *backuppb.CompactLogRequest) (*backuppb.CompactLogResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -155,6 +161,10 @@ func (n *ConsensusNode) CompactLog(ctx context.Context, req *backuppb.CompactLog
 	}, nil
 }
 
+// countCompactableEntriesLocked conta quante entry del log possono essere
+// considerate coperte dallo snapshot fino a upToIndex.
+//
+// Deve essere chiamata con n.mu già acquisito.
 func (n *ConsensusNode) countCompactableEntriesLocked(upToIndex uint64) uint64 {
 	var count uint64
 
@@ -167,6 +177,10 @@ func (n *ConsensusNode) countCompactableEntriesLocked(upToIndex uint64) uint64 {
 	return count
 }
 
+// buildSnapshotID costruisce un identificativo leggibile dello snapshot.
+//
+// L'identificativo include nodeID, lastIncludedIndex e lastIncludedTerm, così il
+// Backup Service può salvare file con nome informativo e verificabile.
 func buildSnapshotID(nodeID string, lastIncludedIndex uint64, lastIncludedTerm uint64) string {
 	return fmt.Sprintf("%s_snapshot_%d_term_%d", nodeID, lastIncludedIndex, lastIncludedTerm)
 }

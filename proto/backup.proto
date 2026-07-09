@@ -4,116 +4,185 @@ package backup;
 
 option go_package = "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/backuppb;backuppb";
 
-// BackupNodeService espone le RPC che ogni Consensus Node rende disponibili
-// al Backup Service.
+// BackupNodeService espone le RPC amministrative che ogni Consensus Node rende
+// disponibili al Backup Service.
 //
-// Queste RPC non sono pensate per i client esterni: servono al Backup Service
-// per orchestrare snapshot, download e compattazione remota del log.
+// Queste RPC non sono pensate per i client applicativi. Servono al Backup
+// Service per forzare snapshot, scaricare lo stato locale di un nodo e chiedere
+// la compattazione logica del log.
 service BackupNodeService {
-  // Forza il nodo a creare uno snapshot locale della state machine.
+  // TriggerSnapshot chiede a un Consensus Node di creare uno snapshot locale
+  // della propria state machine.
   rpc TriggerSnapshot(TriggerSnapshotRequest) returns (TriggerSnapshotResponse);
 
-  // Permette al Backup Service di scaricare lo snapshot locale del nodo.
+  // DownloadSnapshot permette al Backup Service di scaricare lo snapshot locale
+  // più recente o uno snapshot specifico del nodo.
   rpc DownloadSnapshot(DownloadSnapshotRequest) returns (DownloadSnapshotResponse);
 
-  // Richiede al nodo di compattare il log fino a un certo indice.
+  // CompactLog richiede al nodo di compattare logicamente il log fino a un
+  // indice già coperto da snapshot.
   rpc CompactLog(CompactLogRequest) returns (CompactLogResponse);
 }
 
 // BackupService espone le RPC del servizio esterno di backup.
 //
-// Questo servizio è implementato dal componente backup-service.
-// Serve per avviare manualmente un ciclo di backup e per leggere lo stato
-// aggregato del servizio.
+// Questo servizio è implementato dal componente backup-service. Permette a un
+// client amministrativo di avviare un ciclo di backup e leggere lo stato runtime
+// del servizio.
 service BackupService {
-  // Avvia un ciclo di backup coordinato sui nodi configurati.
+  // TriggerBackup avvia un ciclo di backup coordinato sui nodi configurati.
   rpc TriggerBackup(TriggerBackupRequest) returns (TriggerBackupResponse);
 
-  // Restituisce informazioni sullo stato del Backup Service.
+  // GetBackupStatus restituisce informazioni operative sul Backup Service.
   rpc GetBackupStatus(GetBackupStatusRequest) returns (GetBackupStatusResponse);
 }
 
-// Richiesta per forzare la creazione di uno snapshot su un Consensus Node.
+// TriggerSnapshotRequest richiede la creazione di uno snapshot locale su un nodo.
+//
+// requester_id identifica il componente che ha richiesto l'operazione.
 message TriggerSnapshotRequest {
   string requester_id = 1;
 }
 
-// Risposta alla richiesta di snapshot su un Consensus Node.
+// TriggerSnapshotResponse descrive l'esito della creazione dello snapshot.
 message TriggerSnapshotResponse {
+  // accepted indica se il nodo ha accettato e completato la richiesta.
   bool accepted = 1;
+
+  // node_id identifica il Consensus Node che ha prodotto la risposta.
   string node_id = 2;
+
+  // snapshot_id identifica lo snapshot prodotto dal nodo.
   string snapshot_id = 3;
+
+  // last_included_index è l'ultimo indice del log incluso nello snapshot.
   uint64 last_included_index = 4;
+
+  // last_included_term è il termine associato a last_included_index.
   uint64 last_included_term = 5;
+
+  // error contiene un errore applicativo, se la richiesta non è stata accettata.
   string error = 6;
 }
 
-// Richiesta per scaricare lo snapshot locale di un Consensus Node.
+// DownloadSnapshotRequest richiede il download dello snapshot locale di un nodo.
 message DownloadSnapshotRequest {
+  // requester_id identifica il componente che richiede il download.
   string requester_id = 1;
 
+  // snapshot_id identifica lo snapshot richiesto.
   // Se vuoto, il nodo restituisce l'ultimo snapshot disponibile.
   string snapshot_id = 2;
 }
 
-// Risposta con i dati dello snapshot locale del nodo.
+// DownloadSnapshotResponse contiene lo snapshot serializzato restituito dal nodo.
 message DownloadSnapshotResponse {
+  // success indica se lo snapshot è stato scaricato correttamente.
   bool success = 1;
+
+  // node_id identifica il nodo sorgente dello snapshot.
   string node_id = 2;
+
+  // snapshot_id identifica lo snapshot scaricato.
   string snapshot_id = 3;
+
+  // snapshot_data contiene lo snapshot serializzato.
   bytes snapshot_data = 4;
+
+  // last_included_index è l'ultimo indice del log incluso nello snapshot.
   uint64 last_included_index = 5;
+
+  // last_included_term è il termine associato a last_included_index.
   uint64 last_included_term = 6;
+
+  // error contiene un errore applicativo, se il download fallisce.
   string error = 7;
 }
 
-// Richiesta per compattare il log locale di un Consensus Node.
+// CompactLogRequest richiede la compattazione logica del log locale di un nodo.
 message CompactLogRequest {
+  // requester_id identifica il componente che richiede la compattazione.
   string requester_id = 1;
+
+  // snapshot_id identifica lo snapshot che giustifica la compattazione.
   string snapshot_id = 2;
+
+  // up_to_index indica fino a quale indice il nodo può compattare il log.
+  // Il nodo accetta solo indici già coperti dal proprio snapshot locale.
   uint64 up_to_index = 3;
 }
 
-// Risposta alla compattazione del log.
+// CompactLogResponse descrive l'esito della compattazione logica.
 message CompactLogResponse {
+  // success indica se la compattazione è stata eseguita correttamente.
   bool success = 1;
+
+  // node_id identifica il nodo che ha eseguito la compattazione.
   string node_id = 2;
+
+  // compacted_entries indica quante entry sono state considerate compattabili.
   uint64 compacted_entries = 3;
+
+  // error contiene un errore applicativo, se la compattazione fallisce.
   string error = 4;
 }
 
-// Richiesta per avviare un ciclo di backup coordinato.
+// TriggerBackupRequest avvia un ciclo di backup coordinato.
 message TriggerBackupRequest {
+  // requester_id identifica il client amministrativo che avvia il backup.
   string requester_id = 1;
 
-  // Se true, il Backup Service chiede prima ai nodi di creare uno snapshot.
+  // force_snapshot indica se il Backup Service deve chiedere ai nodi di creare
+  // un nuovo snapshot prima del download.
   bool force_snapshot = 2;
 
-  // Se true, dopo aver scaricato correttamente gli snapshot, il Backup Service
-  // invia CompactLog ai nodi.
+  // compact_after_download indica se il Backup Service deve richiedere CompactLog
+  // dopo aver scaricato correttamente gli snapshot.
   bool compact_after_download = 3;
 }
 
-// Risposta al ciclo di backup coordinato.
+// TriggerBackupResponse descrive l'esito del ciclo di backup coordinato.
 message TriggerBackupResponse {
+  // accepted indica se il Backup Service ha accettato la richiesta.
   bool accepted = 1;
+
+  // backup_id identifica il ciclo di backup eseguito.
   string backup_id = 2;
+
+  // downloaded_snapshots indica quanti snapshot sono stati scaricati con successo.
+  // Può essere minore del numero totale di nodi se alcuni nodi non sono raggiungibili.
   uint64 downloaded_snapshots = 3;
+
+  // error contiene un errore applicativo, se il ciclo non viene accettato.
   string error = 4;
 }
 
-// Richiesta stato backup.
+// GetBackupStatusRequest richiede lo stato runtime del Backup Service.
 message GetBackupStatusRequest {}
 
-// Risposta stato backup.
+// GetBackupStatusResponse descrive lo stato runtime del Backup Service.
+//
+// Queste informazioni sono metadati operativi del servizio. Non rappresentano
+// lo stato applicativo del cluster key-value.
 message GetBackupStatusResponse {
+  // service_id identifica il Backup Service.
   string service_id = 1;
+
+  // status descrive lo stato operativo corrente del servizio.
   string status = 2;
 
+  // created_backups conta i backup con almeno uno snapshot scaricato.
   uint64 created_backups = 3;
+
+  // downloaded_snapshots conta il totale degli snapshot scaricati con successo.
   uint64 downloaded_snapshots = 4;
 
+  // last_backup_id identifica l'ultimo backup avviato.
   string last_backup_id = 5;
+
+  // last_snapshot_id identifica l'ultimo snapshot salvato con successo.
   string last_snapshot_id = 6;
+
+  // last_error contiene l'ultimo errore osservato dal servizio.
   string last_error = 7;
 }

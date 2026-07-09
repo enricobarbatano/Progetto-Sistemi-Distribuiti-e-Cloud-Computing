@@ -1,3 +1,7 @@
+// Package main contiene un client di benchmark per misurare prestazioni e latenza.
+//
+// Il programma esegue operazioni di put/get concorrenti verso il cluster e
+// produce file CSV grezzi e riepilogativi per l'analisi di throughput e latenza.
 package main
 
 import (
@@ -56,6 +60,8 @@ type Summary struct {
 	Max         float64
 }
 
+// main legge la configurazione di benchmark, esegue il warm-up e avvia le
+// operazioni misurate in modo concorrente per raccogliere metriche affidabili.
 func main() {
 	cfg := loadConfig()
 	log.Printf("perf-client target=%s cluster_size=%d warmup_puts=%d warmup_gets=%d puts=%d gets=%d concurrency=%d key_prefix=%s csv_out=%s summary_out=%s",

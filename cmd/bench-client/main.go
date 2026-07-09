@@ -1,3 +1,7 @@
+// Package main contiene un client di test per interagire con il servizio key-value.
+//
+// Il programma è pensato per eseguire operazioni manuali e di smoke test verso
+// il cluster: scoperta del leader, lettura, scrittura e cancellazione di chiavi.
 package main
 
 // key-value esposto dai consensus node.
@@ -34,6 +38,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// main interpreta le variabili d'ambiente e invoca l'operazione richiesta.
+//
+// Le operazioni supportate sono leader, get, put, delete e all, che permette
+// di eseguire un flusso rapido di test contro il cluster.
 func main() {
 	target := getEnv("TARGET", "localhost:50051")
 	op := strings.ToLower(getEnv("OP", "all"))

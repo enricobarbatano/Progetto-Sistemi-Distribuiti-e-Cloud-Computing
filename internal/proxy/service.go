@@ -1,11 +1,16 @@
-// Package proxy contiene la logica interna del Client Proxy Service.
+// Package proxy implementa il Client Proxy Service.
 //
-// Questo file contiene ProxyService, cioè l'implementazione gRPC esposta ai
-// client esterni.
+// Il Proxy è il punto di ingresso stateless per i client esterni. Non mantiene
+// dati applicativi e non partecipa al protocollo di consenso: il suo compito è
+// instradare Put, Get, Delete e GetLeader verso il Consensus Node corretto.
 //
-// ProxyService non conosce i dettagli del cluster Raft: non apre connessioni
-// verso i Consensus Node, non gestisce leader cache e non implementa retry.
-// Tutta la logica di routing viene delegata a Router.
+// Il package implementa Client-side Service Discovery: il leader non è
+// configurato staticamente nel client, ma viene scoperto dinamicamente dal Proxy
+// interrogando i nodi o usando i leader_hint restituiti dai follower.
+//
+// Il package integra inoltre retry, backoff e Circuit Breaker per evitare che
+// nodi non disponibili causino cascading failure o degradino l'intero sistema.
+
 package proxy
 
 import (

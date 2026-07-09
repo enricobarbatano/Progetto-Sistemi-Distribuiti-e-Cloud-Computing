@@ -17,6 +17,9 @@ import (
 	backuppb "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/backuppb"
 )
 
+// BackupManager coordina il ciclo di vita di un backup remoto: forza snapshot,
+// scarica i file, li salva su disco e richiede la compattazione del log ai nodi
+// raggiungibili del cluster. Mantiene anche lo stato aggregato del servizio.
 type BackupManager struct {
 	config    Config
 	client    *NodeClient
@@ -33,6 +36,8 @@ type BackupManager struct {
 	lastError           string
 }
 
+// NewBackupManager crea un coordinatore di backup pronto a eseguire cicli di
+// salvataggio sugli indirizzi configurati nel cluster.
 func NewBackupManager(
 	config Config,
 	client *NodeClient,
@@ -50,6 +55,8 @@ func NewBackupManager(
 	}
 }
 
+// StartPeriodic avvia un loop periodico che esegue backup automatici secondo
+// l'intervallo configurato, se tale intervallo è maggiore di zero.
 func (m *BackupManager) StartPeriodic(ctx context.Context) {
 	if m.config.BackupInterval <= 0 {
 		return
@@ -74,6 +81,9 @@ func (m *BackupManager) StartPeriodic(ctx context.Context) {
 	}()
 }
 
+// RunBackup esegue un ciclo completo di backup sui nodi configurati. Se un nodo
+// fallisce, l'operazione continua sugli altri nodi e restituisce un risultato
+// parziale invece di interrompere tutto il processo.
 func (m *BackupManager) RunBackup(ctx context.Context, forceSnapshot bool, compactAfterDownload bool) (string, uint64, error) {
 	backupID := fmt.Sprintf("backup_%d", time.Now().UTC().UnixNano())
 
@@ -161,6 +171,8 @@ func (m *BackupManager) RunBackup(ctx context.Context, forceSnapshot bool, compa
 	return backupID, downloaded, nil
 }
 
+// StatusResponse restituisce una copia dello stato corrente del manager per
+// essere esposta attraverso il servizio gRPC amministrativo.
 func (m *BackupManager) StatusResponse() *backuppb.GetBackupStatusResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()

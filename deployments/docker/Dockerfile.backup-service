@@ -1,9 +1,12 @@
 # syntax=docker/dockerfile:1
 
+# Stage 1: build del binario Go del Backup Service con l'ambiente completo di
+# compilazione necessario per il progetto.
 FROM golang:1.26.4-alpine AS builder
 
 WORKDIR /app
 
+# Git consente di scaricare le dipendenze del modulo durante la build.
 RUN apk add --no-cache git
 
 COPY go.mod go.sum ./
@@ -11,16 +14,22 @@ RUN go mod download
 
 COPY . .
 
+# Compiliamo il servizio in un eseguibile lightweight per il runtime finale.
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/backup-service ./cmd/backup-service
 
+# Stage 2: immagine finale leggera basata su Alpine, adatta per il deploy del
+# servizio amministrativo di backup.
 FROM alpine:3.24
 
 WORKDIR /app
 
+# Installiamo i certificati TLS richiesti dalle connessioni di rete del servizio.
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /out/backup-service /usr/local/bin/backup-service
 
+# Espone la porta gRPC amministrativa usata dal client di backup e dalle API.
 EXPOSE 9090
 
+# Definisce il comando di avvio del container.
 ENTRYPOINT ["backup-service"]

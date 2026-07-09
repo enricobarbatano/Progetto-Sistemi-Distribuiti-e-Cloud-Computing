@@ -15,12 +15,16 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// NodeClient incapsula la connessione gRPC verso i nodi del cluster e espone
+// metodi semplici per invocare le RPC di snapshot e compattazione.
 type NodeClient struct {
 	mu      sync.Mutex
 	conns   map[string]*grpc.ClientConn
 	clients map[string]backuppb.BackupNodeServiceClient
 }
 
+// NewNodeClient crea un client di backup vuoto con una cache di connessioni
+// pronta ad essere riempita al primo contatto con un nodo.
 func NewNodeClient() *NodeClient {
 	return &NodeClient{
 		conns:   make(map[string]*grpc.ClientConn),
@@ -28,6 +32,8 @@ func NewNodeClient() *NodeClient {
 	}
 }
 
+// TriggerSnapshot richiede al nodo remoto di creare uno snapshot locale del
+// proprio stato, così il Backup Service può salvarlo in modo affidabile.
 func (c *NodeClient) TriggerSnapshot(ctx context.Context, address string, requesterID string) (*backuppb.TriggerSnapshotResponse, error) {
 	client, err := c.clientForAddress(address)
 	if err != nil {
@@ -39,6 +45,8 @@ func (c *NodeClient) TriggerSnapshot(ctx context.Context, address string, reques
 	})
 }
 
+// DownloadSnapshot scarica lo snapshot remoto dal nodo specificato, restituendo
+// il payload binario da salvare sul disco di backup.
 func (c *NodeClient) DownloadSnapshot(ctx context.Context, address string, requesterID string, snapshotID string) (*backuppb.DownloadSnapshotResponse, error) {
 	client, err := c.clientForAddress(address)
 	if err != nil {
@@ -51,6 +59,8 @@ func (c *NodeClient) DownloadSnapshot(ctx context.Context, address string, reque
 	})
 }
 
+// CompactLog richiede al nodo remoto di compattare il proprio log fino a un
+// indice di sicurezza già coperto dallo snapshot locale.
 func (c *NodeClient) CompactLog(ctx context.Context, address string, requesterID string, snapshotID string, upToIndex uint64) (*backuppb.CompactLogResponse, error) {
 	client, err := c.clientForAddress(address)
 	if err != nil {
@@ -64,6 +74,7 @@ func (c *NodeClient) CompactLog(ctx context.Context, address string, requesterID
 	})
 }
 
+// Close chiude tutte le connessioni gRPC aperte verso i nodi del cluster.
 func (c *NodeClient) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

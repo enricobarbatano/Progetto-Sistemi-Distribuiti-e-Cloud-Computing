@@ -211,6 +211,7 @@ Docker Engine
 Docker Compose plugin
 Docker Buildx >= 0.17.0
 protoc
+GNU Make
 protoc-gen-go
 protoc-gen-go-grpc
 buf CLI
@@ -718,22 +719,358 @@ La pipeline verifica:
 
 ## Comandi Make principali
 
+Il progetto include un `Makefile` per semplificare le operazioni più importanti: controlli locali sul codice, generazione degli stub Protobuf, gestione dei cluster Docker Compose, test manuali tramite Client Proxy, test del Backup Service e benchmark sperimentali.
+
+Per visualizzare tutti i target disponibili:
+
 ```bash
 make help
+```
+
+Prima di eseguire build, test o Docker Compose, è possibile verificare gli strumenti installati con:
+
+```bash
+make doctor
+```
+
+Il comando mostra le versioni di Go, protoc, Docker, Docker Compose e buf. Un esempio di output verificato localmente è:
+
+```text
+go version go1.25.4 windows/amd64
+libprotoc 33.0
+Docker version 29.5.3
+Docker Compose version v5.1.4
+buf 1.71.0
+```
+
+I principali controlli locali sul codice sono:
+
+```bash
 make tidy
 make fmt
 make vet
 make test
 make build
-make ci
-make proto
-make buf
-make docker-build
-make docker-up
-make docker-ps
-make docker-down
-make docker-clean
 ```
+
+Il significato dei target è il seguente:
+
+```text
+make tidy   - esegue go mod tidy e verifica che go.mod/go.sum siano allineati
+make fmt    - formatta il codice Go con gofmt
+make vet    - esegue go vet ./...
+make test   - esegue go test ./...
+make build  - compila tutti i comandi presenti in cmd/
+```
+
+Il comando consigliato prima di ogni commit o consegna è:
+
+```bash
+make ci
+```
+
+Questo target esegue in sequenza:
+
+```text
+make tidy
+make fmt
+make vet
+make test
+make build
+```
+
+In questo modo è possibile controllare localmente gli stessi aspetti principali verificati dalla pipeline CI.
+
+Dopo modifiche ai file `.proto`, rigenerare gli stub Go con:
+
+```bash
+make proto
+```
+
+Per controllare lint e formattazione dei file Protobuf:
+
+```bash
+make buf
+```
+
+Dopo `make proto`, è consigliato eseguire:
+
+```bash
+make ci
+```
+
+Per avviare il cluster base a 3 nodi:
+
+```bash
+make docker-up
+```
+
+oppure, in forma esplicita:
+
+```bash
+make docker-up-3
+```
+
+Per avviare i cluster usati nei test di scalabilità:
+
+```bash
+make docker-up-3
+make docker-up-5
+make docker-up-7
+```
+
+Per controllare lo stato dei container:
+
+```bash
+make docker-ps
+make docker-ps-3
+make docker-ps-5
+make docker-ps-7
+```
+
+Per visualizzare i log dei container:
+
+```bash
+make docker-logs
+make docker-logs-3
+make docker-logs-5
+make docker-logs-7
+```
+
+Per arrestare i container senza cancellare i volumi persistenti:
+
+```bash
+make docker-down
+make docker-down-3
+make docker-down-5
+make docker-down-7
+```
+
+Per arrestare i container cancellando anche i volumi persistenti:
+
+```bash
+make docker-clean
+make docker-clean-3
+make docker-clean-5
+make docker-clean-7
+```
+
+Usare i target `docker-clean` solo quando si vuole eliminare completamente lo stato persistente, inclusi WAL, snapshot e state file dei Consensus Node.
+
+Dopo aver avviato il cluster:
+
+```bash
+make docker-up-3
+```
+
+è possibile verificare lo stato del Client Proxy con:
+
+```bash
+curl http://localhost:8081/health
+```
+
+Su PowerShell, se `curl` viene interpretato come alias di `Invoke-WebRequest`, usare:
+
+```powershell
+Invoke-WebRequest -UseBasicParsing http://localhost:8081/health
+```
+
+oppure:
+
+```powershell
+curl.exe http://localhost:8081/health
+```
+
+L'output atteso è:
+
+```json
+{"status":"ok"}
+```
+
+I client manuali possono essere eseguiti tramite Make. Per scoprire il leader corrente:
+
+```bash
+make bench-leader
+```
+
+Per eseguire una Put:
+
+```bash
+make bench-put KEY=test-key VALUE=test-value
+```
+
+Per eseguire una Get:
+
+```bash
+make bench-get KEY=test-key
+```
+
+Per eseguire una Delete:
+
+```bash
+make bench-delete KEY=test-key
+```
+
+Esempio completo:
+
+```bash
+make bench-put KEY=a VALUE=b
+make bench-get KEY=a
+make bench-delete KEY=a
+```
+
+Per usare un'istanza EC2 remota:
+
+```bash
+make bench-leader TARGET=<EC2_PUBLIC_IP>:8080
+make bench-put TARGET=<EC2_PUBLIC_IP>:8080 KEY=a VALUE=b
+make bench-get TARGET=<EC2_PUBLIC_IP>:8080 KEY=a
+```
+
+Il Backup Service può essere testato tramite Make. Per leggere lo stato del servizio:
+
+```bash
+make backup-status
+```
+
+Per avviare manualmente un backup:
+
+```bash
+make backup-run
+```
+
+Esempio verso EC2:
+
+```bash
+make backup-status BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
+make backup-run BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
+```
+
+Le variabili principali per il Backup Service sono:
+
+```text
+BACKUP_TARGET             default localhost:9090
+FORCE_SNAPSHOT            default true
+COMPACT_AFTER_DOWNLOAD    default true
+```
+
+Il benchmark di latenza e throughput tramite `perf-client` può essere eseguito con:
+
+```bash
+make perf
+```
+
+Esempio locale su cluster a 3 nodi:
+
+```bash
+make perf CLUSTER_SIZE=3
+```
+
+Esempio remoto verso EC2:
+
+```bash
+make perf TARGET=<EC2_PUBLIC_IP>:8080 CLUSTER_SIZE=5 KEY_PREFIX=ec2-scalability-5
+```
+
+Le variabili principali del benchmark Put/Get sono:
+
+```text
+TARGET             default localhost:8080
+CLUSTER_SIZE       default 3
+WARMUP_PUTS        default 30
+WARMUP_GETS        default 30
+PUTS               default 300
+GETS               default 300
+CONCURRENCY        default 1
+KEY_PREFIX         default local-test
+PERF_CSV_OUT       default reports/raw/scalability_<CLUSTER_SIZE>nodes.csv
+PERF_SUMMARY_OUT   default reports/processed/scalability_<CLUSTER_SIZE>nodes_summary.csv
+```
+
+Il benchmark di failover misura il recupero dopo crash del leader:
+
+```bash
+make failover
+```
+
+Esempio su cluster a 5 nodi:
+
+```bash
+make failover TARGET=<EC2_PUBLIC_IP>:8080 CLUSTER_SIZE=5 TRIALS=10
+```
+
+Il client indica il leader corrente e richiede di fermare manualmente il container corrispondente. Dopo ogni trial, il nodo può essere riavviato con Docker Compose.
+
+Le variabili principali del benchmark failover sono:
+
+```text
+TARGET             default localhost:8080
+CLUSTER_SIZE       default 3
+TRIALS             default 10
+FAILOVER_CSV_OUT   default reports/raw/failover_trials.csv
+KEY_PREFIX         default local-test
+```
+
+Il benchmark del Backup Service con dataset crescenti può essere eseguito con:
+
+```bash
+make backup-bench
+```
+
+Esempio remoto verso EC2:
+
+```bash
+make backup-bench TARGET=<EC2_PUBLIC_IP>:8080 BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
+```
+
+Le variabili principali del benchmark Backup Service sono:
+
+```text
+TARGET                    default localhost:8080
+BACKUP_TARGET             default localhost:9090
+DATASET_SIZES             default 100,300,600
+BACKUP_CSV_OUT            default reports/raw/backup_compaction_results.csv
+KEY_PREFIX                default local-test
+FORCE_SNAPSHOT            default true
+COMPACT_AFTER_DOWNLOAD    default true
+```
+
+Per verificare rapidamente il sistema in locale, si può usare la seguente sequenza:
+
+```bash
+make docker-up-3
+curl.exe http://localhost:8081/health
+make bench-leader
+make bench-put KEY=test-key VALUE=test-value
+make bench-get KEY=test-key
+make backup-status
+make backup-run
+make docker-down-3
+```
+
+Questa sequenza avvia il cluster a 3 nodi, verifica il Client Proxy, esegue operazioni key-value tramite Proxy e testa il Backup Service.
+
+Prima del commit finale o della consegna, è consigliato eseguire:
+
+```bash
+make doctor
+make proto
+make ci
+```
+
+Se si vuole verificare anche Docker Compose e i servizi principali:
+
+```bash
+make docker-up-3
+curl.exe http://localhost:8081/health
+make bench-leader
+make bench-put KEY=test-key VALUE=test-value
+make bench-get KEY=test-key
+make backup-status
+make backup-run
+make docker-down-3
+```
+
 
 ---
 

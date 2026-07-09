@@ -1,3 +1,8 @@
+// Package main contiene il punto di ingresso del Client Proxy.
+//
+// Questo eseguibile costruisce il servizio stateless che espone un unico punto
+// di accesso ai client esterni e instrada le richieste verso il leader del
+// cluster tramite il router, il leader cache e i Circuit Breaker interni.
 package main
 
 import (
@@ -13,6 +18,11 @@ import (
 	"google.golang.org/grpc"
 )
 
+// main configura e avvia il Client Proxy.
+//
+// Il flusso di avvio prevede la lettura della configurazione, l'avvio del
+// server HTTP di health, la creazione dei componenti di routing e resilienza e
+// infine la registrazione del servizio gRPC esposto ai client.
 func main() {
 	config, err := proxy.LoadConfigFromEnv()
 	if err != nil {

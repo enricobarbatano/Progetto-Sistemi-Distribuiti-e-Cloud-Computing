@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Genera grafici e CSV aggregato dai benchmark di scalabilità.
 

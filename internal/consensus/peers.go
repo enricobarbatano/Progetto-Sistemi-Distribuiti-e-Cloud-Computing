@@ -1,11 +1,13 @@
-// Package consensus contiene la logica del protocollo di consenso.
+// Package consensus contiene anche la gestione dei peer del cluster.
 //
-// Questo file raccoglie la gestione dei peer del cluster: creazione e riuso
-// dei client gRPC verso gli altri nodi, e tracking dello stato online/offline.
+// Questo file isola la logica di supporto per comunicare con gli altri
+// Consensus Node: creazione e riuso dei client gRPC, chiusura delle connessioni
+// e tracking dello stato online/offline osservato.
 //
-// La logica è separata da node.go per mantenere ConsensusNode più leggibile:
-// il nodo continua a coordinare il protocollo Raft, mentre questo file contiene
-// solo il codice di supporto per comunicare con gli altri nodi.
+// La separazione da node.go mantiene più leggibile la logica del consenso:
+// election e replication usano questi helper, ma non gestiscono direttamente i
+// dettagli di dial gRPC e diagnostica dei peer.
+
 package consensus
 
 import (
@@ -17,14 +19,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// getPeerClientLocked restituisce un client gRPC persistente verso un peer.
+// getPeerClientLocked restituisce un client gRPC riutilizzabile verso un peer.
 //
-// Deve essere chiamata con n.mu già acquisito.
-// Se il client esiste già, viene riutilizzato.
-// Se non esiste, viene creata una nuova connessione gRPC e salvata nella struct.
+// Deve essere chiamata con n.mu già acquisito. Se il client esiste già, viene
+// riutilizzato; altrimenti viene creata una nuova connessione e salvata nella
+// struct del nodo.
 //
-// Questo evita di aprire una nuova connessione per ogni RequestVote,
-// AppendEntries o heartbeat.
+// Il riuso delle connessioni evita di aprire un nuovo canale gRPC per ogni
+// RequestVote, AppendEntries o heartbeat, riducendo overhead e latenza nelle
+// fasi di elezione e replica.
 func (n *ConsensusNode) getPeerClientLocked(peerID string, peerAddress string) (consensuspb.ConsensusServiceClient, error) {
 	if client, ok := n.peerClients[peerID]; ok {
 		return client, nil
@@ -47,10 +50,13 @@ func (n *ConsensusNode) getPeerClientLocked(peerID string, peerAddress string) (
 
 // markPeerOfflineLocked marca un peer come non raggiungibile.
 //
-// Il log viene scritto solo quando il peer passa da online a offline.
-// Questo evita di stampare lo stesso errore a ogni heartbeat fallito.
+// Questo stato non modifica direttamente il risultato del consenso, che resta
+// basato su quorum, ma aiuta logging, diagnostica e gestione dei tentativi verso
+// nodi temporaneamente non disponibili.
 //
-// Deve essere chiamata con n.mu già acquisito.
+// Il log viene scritto solo quando il peer passa da online a offline, evitando
+// messaggi ripetuti a ogni heartbeat fallito. Deve essere chiamata con n.mu già
+// acquisito.
 func (n *ConsensusNode) markPeerOfflineLocked(peerID string, err error) {
 	wasOnline, exists := n.peerOnline[peerID]
 	if !exists || wasOnline {
@@ -60,9 +66,11 @@ func (n *ConsensusNode) markPeerOfflineLocked(peerID string, err error) {
 	n.peerOnline[peerID] = false
 }
 
-// markPeerOnlineLocked marca un peer come raggiungibile.
+// markPeerOnlineLocked marca un peer come nuovamente raggiungibile.
 //
-// Il log viene scritto solo quando il peer passa da offline a online.
+// Il log viene scritto solo quando il peer passa da offline a online. Questo
+// rende più leggibili i log durante test di fault tolerance, crash leader o
+// arresto temporaneo di un container.
 //
 // Deve essere chiamata con n.mu già acquisito.
 func (n *ConsensusNode) markPeerOnlineLocked(peerID string) {

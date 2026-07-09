@@ -1,13 +1,13 @@
-// Package consensus contiene la logica del protocollo di consenso.
-//
-// Questo file raccoglie la RPC InstallSnapshot.
+// Package consensus contiene anche la RPC InstallSnapshot.
 //
 // InstallSnapshot viene usata dal leader quando un follower è troppo indietro
-// e le entry necessarie non sono più disponibili nel log, perché sono già state
-// incluse in uno snapshot locale del leader.
+// rispetto al log corrente e le entry necessarie sono già incluse nello snapshot
+// locale del leader.
 //
-// In questa versione il protocollo supporta già offset/data/done nel proto,
-// ma l'implementazione usa un singolo chunk: offset=0 e done=true.
+// In questa versione il proto supporta offset/data/done, quindi il protocollo è
+// predisposto per snapshot a chunk multipli. L'implementazione attuale invia
+// però lo snapshot in un singolo chunk: offset=0 e done=true.
+
 package consensus
 
 import (
@@ -17,18 +17,16 @@ import (
 	"github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/internal/persistence"
 )
 
-// InstallSnapshot gestisce la RPC usata dal leader per installare uno snapshot.
+// InstallSnapshot installa sul follower uno snapshot inviato dal leader.
 //
-// Il follower:
-//   - rifiuta snapshot con termine vecchio;
-//   - aggiorna il proprio termine se necessario;
-//   - riconosce il leader;
-//   - decodifica lo snapshot;
-//   - ripristina la state machine;
-//   - aggiorna lastIncludedIndex e lastIncludedTerm;
-//   - scarta le entry obsolete dal log;
-//   - persiste snapshot e stato corrente;
-//   - resetta il timer di elezione.
+// Il follower rifiuta snapshot provenienti da termini vecchi. Se il termine
+// della richiesta è più recente, il nodo aggiorna il proprio termine e passa a
+// follower. Successivamente decodifica lo snapshot, ripristina la state machine,
+// aggiorna lastIncludedIndex e lastIncludedTerm, scarta le entry obsolete dal log
+// e persiste snapshot e stato corrente.
+//
+// Questa RPC permette a un follower molto arretrato di riallinearsi senza dover
+// ricevere tutte le entry storiche una per una.
 func (n *ConsensusNode) InstallSnapshot(ctx context.Context, req *consensuspb.InstallSnapshotRequest) (*consensuspb.InstallSnapshotResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -57,8 +55,9 @@ func (n *ConsensusNode) InstallSnapshot(ctx context.Context, req *consensuspb.In
 		n.leaderAddress = n.address
 	}
 
-	// In questa fase gestiamo snapshot in un singolo chunk.
-	// Il proto è già pronto per i chunk multipli, ma non li usiamo ancora.
+	// L'implementazione corrente accetta solo snapshot completi in un singolo chunk.
+	// Richieste parziali vengono rifiutate, anche se il contratto proto è già pronto
+	// per supportarle in futuro.
 	if req.Offset != 0 || !req.Done {
 		if stateChanged {
 			if err := n.persistLocked(); err != nil {
@@ -74,7 +73,9 @@ func (n *ConsensusNode) InstallSnapshot(ctx context.Context, req *consensuspb.In
 		}, nil
 	}
 
-	// Se lo snapshot è vecchio o già applicato, non serve reinstallarlo.
+	// Se lo snapshot è vecchio o già coperto dallo snapshot locale, non serve
+	// reinstallarlo. La risposta positiva rende l'operazione idempotente rispetto a
+	// retry del leader.
 	if req.LastIncludedIndex <= n.lastIncludedIndex {
 		if stateChanged {
 			if err := n.persistLocked(); err != nil {
@@ -95,7 +96,8 @@ func (n *ConsensusNode) InstallSnapshot(ctx context.Context, req *consensuspb.In
 		return nil, err
 	}
 
-	// Verifica di coerenza tra metadati RPC e contenuto serializzato.
+	// Verifica che i metadati dichiarati nella RPC coincidano con il contenuto
+	// serializzato. Questo evita di installare snapshot incoerenti.
 	if snapshot.LastIncludedIndex != req.LastIncludedIndex || snapshot.LastIncludedTerm != req.LastIncludedTerm {
 		return &consensuspb.InstallSnapshotResponse{
 			Term:    n.currentTerm,
@@ -103,6 +105,7 @@ func (n *ConsensusNode) InstallSnapshot(ctx context.Context, req *consensuspb.In
 		}, nil
 	}
 
+	// Lo snapshot sostituisce lo stato applicativo locale fino a LastIncludedIndex.
 	n.store.Restore(snapshot.Data)
 	n.lastIncludedIndex = snapshot.LastIncludedIndex
 	n.lastIncludedTerm = snapshot.LastIncludedTerm

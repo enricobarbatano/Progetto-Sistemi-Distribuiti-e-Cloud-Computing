@@ -4,99 +4,187 @@ package consensus;
 
 option go_package = "github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing/gen/go/consensuspb;consensuspb";
 
-// ConsensusService contiene le RPC interne usate dai nodi di consenso.
-// In questo progetto rappresenta una versione semplificata del protocollo Raft.
+// ConsensusService contiene le RPC interne usate dai Consensus Node.
+//
+// Queste RPC non sono esposte ai client applicativi. Servono ai nodi del cluster
+// per gestire elezione del leader, replica del log e installazione di snapshot.
+// Il servizio rappresenta il canale di comunicazione interno del protocollo di
+// consenso basato su log replicato.
 service ConsensusService {
-  // Usata da un nodo Candidate per richiedere voti agli altri nodi.
+  // RequestVote è usata da un nodo Candidate per richiedere voti durante
+  // un'elezione.
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
 
-  // Usata dal Leader per replicare log entries e inviare heartbeat.
+  // AppendEntries è usata dal Leader per inviare heartbeat e replicare entry
+  // del log verso i follower.
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
 
-  // Usata dal Leader per inviare snapshot a follower troppo arretrati.
+  // InstallSnapshot è usata dal Leader per riallineare follower troppo arretrati
+  // quando le entry necessarie sono già incluse nello snapshot locale.
   rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
 }
 
-// Ruolo corrente di un nodo nel cluster Raft.
+// NodeRole descrive il ruolo corrente di un nodo nel cluster.
 enum NodeRole {
+  // NODE_ROLE_UNSPECIFIED indica un ruolo non inizializzato.
   NODE_ROLE_UNSPECIFIED = 0;
+
+  // NODE_ROLE_FOLLOWER indica un nodo che segue un leader o attende elezioni.
   NODE_ROLE_FOLLOWER = 1;
+
+  // NODE_ROLE_CANDIDATE indica un nodo che sta richiedendo voti per diventare leader.
   NODE_ROLE_CANDIDATE = 2;
+
+  // NODE_ROLE_LEADER indica il nodo che coordina scritture e replica del log.
   NODE_ROLE_LEADER = 3;
 }
 
-// Tipo di operazione memorizzata nel log replicato.
+// LogOperation descrive il tipo di comando applicativo contenuto in una LogEntry.
 enum LogOperation {
+  // LOG_OPERATION_UNSPECIFIED indica un'operazione non inizializzata.
   LOG_OPERATION_UNSPECIFIED = 0;
+
+  // LOG_OPERATION_PUT inserisce o aggiorna una chiave nella state machine.
   LOG_OPERATION_PUT = 1;
+
+  // LOG_OPERATION_DELETE elimina una chiave dalla state machine.
   LOG_OPERATION_DELETE = 2;
+
+  // LOG_OPERATION_NOOP non modifica la state machine.
+  // Può essere usata per entry tecniche del leader.
   LOG_OPERATION_NOOP = 3;
 }
 
-// Singola entry del log replicato.
+// LogEntry rappresenta una singola entry del log replicato.
+//
+// Ogni entry contiene indice, termine e comando da applicare alla state machine.
+// Le entry vengono applicate allo storage solo dopo il commit su quorum.
 message LogEntry {
+  // index è la posizione dell'entry nel log replicato.
   uint64 index = 1;
+
+  // term è il termine in cui l'entry è stata creata dal leader.
   uint64 term = 2;
+
+  // operation indica il tipo di comando applicativo.
   LogOperation operation = 3;
+
+  // key è la chiave interessata dall'operazione.
   string key = 4;
+
+  // value è il valore associato alla chiave.
+  // Viene usato principalmente per operazioni PUT.
   string value = 5;
 }
 
-// Richiesta di voto inviata da un Candidate.
+// RequestVoteRequest rappresenta una richiesta di voto inviata da un Candidate.
 message RequestVoteRequest {
+  // term è il termine del Candidate.
+  // I nodi rifiutano richieste con termine più vecchio del proprio.
   uint64 term = 1;
+
+  // candidate_id identifica il nodo che richiede il voto.
   string candidate_id = 2;
+
+  // last_log_index è l'indice dell'ultima entry nel log del Candidate.
   uint64 last_log_index = 3;
+
+  // last_log_term è il termine dell'ultima entry nel log del Candidate.
+  // Insieme a last_log_index permette al votante di verificare che il log del
+  // Candidate sia almeno aggiornato quanto il proprio.
   uint64 last_log_term = 4;
 }
 
-// Risposta alla richiesta di voto.
+// RequestVoteResponse rappresenta la risposta a una richiesta di voto.
 message RequestVoteResponse {
+  // term è il termine corrente del nodo che risponde.
+  // Se è maggiore del termine del Candidate, il Candidate deve aggiornarsi.
   uint64 term = 1;
+
+  // vote_granted indica se il voto è stato concesso.
   bool vote_granted = 2;
 }
 
-// Richiesta AppendEntries usata sia per heartbeat sia per replicazione log.
+// AppendEntriesRequest viene usata dal Leader per heartbeat e replica del log.
 message AppendEntriesRequest {
+  // term è il termine corrente del Leader.
   uint64 term = 1;
+
+  // leader_id identifica il Leader che invia la richiesta.
+  // I follower lo usano anche per aggiornare il leader noto.
   string leader_id = 2;
+
+  // prev_log_index è l'indice dell'entry immediatamente precedente alle entry inviate.
   uint64 prev_log_index = 3;
+
+  // prev_log_term è il termine dell'entry prev_log_index.
+  // Il follower usa prev_log_index e prev_log_term per verificare la coerenza
+  // del prefisso del log.
   uint64 prev_log_term = 4;
+
+  // entries contiene le entry da replicare.
+  // Se è vuoto, la RPC rappresenta un heartbeat.
   repeated LogEntry entries = 5;
+
+  // leader_commit è il più alto indice che il Leader considera committed.
+  // Il follower usa questo valore per avanzare il proprio commit index.
   uint64 leader_commit = 6;
 }
 
-// Risposta ad AppendEntries.
+// AppendEntriesResponse rappresenta la risposta del follower ad AppendEntries.
 message AppendEntriesResponse {
+  // term è il termine corrente del follower.
+  // Se maggiore del termine del Leader, il Leader deve fare step-down.
   uint64 term = 1;
+
+  // success indica se il follower ha accettato heartbeat o entry.
   bool success = 2;
+
+  // match_index indica l'ultimo indice noto come replicato correttamente
+  // sul follower.
   uint64 match_index = 3;
 
-  // Informazioni usate dal leader per il fast back-off.
-  //
-  // Se success=false, il follower può indicare al leader un punto più utile
-  // da cui riprovare la replica, evitando di decrementare nextIndex di uno
-  // alla volta.
-  //
-  // conflict_term vale 0 quando il follower non possiede alcuna entry
-  // all'indice richiesto.
+  // conflict_index aiuta il Leader ad aggiornare nextIndex in caso di conflitto.
+  // Permette di evitare decrementi uno alla volta quando i log divergono.
   uint64 conflict_index = 4;
+
+  // conflict_term indica il termine in conflitto.
+  // Vale zero quando il follower non possiede alcuna entry all'indice richiesto.
   uint64 conflict_term = 5;
 }
 
-// Richiesta per installare uno snapshot su un follower.
+// InstallSnapshotRequest viene inviata dal Leader a un follower arretrato.
 message InstallSnapshotRequest {
+  // term è il termine corrente del Leader.
   uint64 term = 1;
+
+  // leader_id identifica il Leader che invia lo snapshot.
   string leader_id = 2;
+
+  // last_included_index è l'ultimo indice del log incluso nello snapshot.
   uint64 last_included_index = 3;
+
+  // last_included_term è il termine associato a last_included_index.
   uint64 last_included_term = 4;
+
+  // offset indica la posizione del chunk nello snapshot.
+  // L'implementazione corrente usa un singolo chunk con offset pari a zero.
   uint64 offset = 5;
+
+  // data contiene lo snapshot serializzato.
   bytes data = 6;
+
+  // done indica se il chunk completa il trasferimento dello snapshot.
+  // L'implementazione corrente usa done=true perché invia un solo chunk.
   bool done = 7;
 }
 
-// Risposta all'installazione dello snapshot.
+// InstallSnapshotResponse rappresenta l'esito dell'installazione dello snapshot.
 message InstallSnapshotResponse {
+  // term è il termine corrente del follower.
+  // Se maggiore del termine del Leader, il Leader deve aggiornarsi.
   uint64 term = 1;
+
+  // success indica se lo snapshot è stato accettato e installato.
   bool success = 2;
 }

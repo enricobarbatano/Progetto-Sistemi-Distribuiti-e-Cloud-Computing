@@ -1,3 +1,8 @@
+// Package main contiene un client di test dedicato alla valutazione del failover.
+//
+// Il programma misura il tempo necessario affinché il cluster elegga un nuovo
+// leader e recuperi le scritture dopo il fermo di un nodo, producendo un CSV
+// con i risultati delle prove.
 package main
 
 import (
@@ -46,6 +51,8 @@ type TrialResult struct {
 	Notes                string
 }
 
+// main esegue una sequenza di trial di failover leggendo la configurazione,
+// contattando il proxy del cluster e registrando i risultati su file CSV.
 func main() {
 	cfg := loadConfig()
 	log.Printf("failover-client target=%s cluster_size=%d trials=%d csv_out=%s", cfg.Target, cfg.ClusterSize, cfg.Trials, cfg.CSVOut)

@@ -1,12 +1,12 @@
-// Package consensus contiene la logica del protocollo di consenso.
+// Package consensus contiene anche la logica di elezione del leader.
 //
-// Questo file raccoglie la parte di Raft relativa all'elezione del leader:
-// timeout di elezione, transizione a Candidate, invio delle RequestVote,
-// conteggio dei voti e transizione a Leader.
+// Questo file raccoglie la parte del protocollo relativa a timeout di elezione,
+// transizione a Candidate, invio delle RequestVote, conteggio dei voti e
+// transizione a Leader.
 //
-// La separazione da node.go serve a ridurre la complessità della struct
-// principale: ConsensusNode resta l'orchestratore del nodo, mentre qui viene
-// isolato il comportamento legato alla leadership.
+// I timeout randomizzati riducono la probabilità di split-vote: se più nodi
+// diventano candidate nello stesso momento, la randomizzazione rende più
+// probabile che uno dei timer successivi scada prima degli altri.
 package consensus
 
 import (
@@ -20,8 +20,9 @@ import (
 
 // randomElectionTimeout genera un timeout di elezione casuale.
 //
-// L'intervallo è volutamente abbastanza largo per rendere più stabili i test
-// locali con più processi avviati manualmente tramite go run.
+// L'intervallo è volutamente conservativo per rendere stabile il cluster in
+// ambiente Docker/EC2, dove scheduling dei container e jitter di rete possono
+// introdurre ritardi. La randomizzazione riduce la probabilità di split-vote.
 func randomElectionTimeout() time.Duration {
 	minTimeout := 1500
 	maxTimeout := 3000
@@ -30,10 +31,11 @@ func randomElectionTimeout() time.Duration {
 	return time.Duration(randomMillis) * time.Millisecond
 }
 
-// resetElectionTimer notifica al loop di elezione che il timer deve essere resettato.
+// resetElectionTimer notifica al loop di elezione che il timeout va riavviato.
 //
-// Il canale è bufferizzato e l'invio è non bloccante: se esiste già un reset
-// pendente, non serve accodarne un altro.
+// Il reset viene inviato quando il nodo riceve un heartbeat valido o concede un
+// voto. L'invio è non bloccante: se esiste già un reset pendente, non serve
+// accodarne un altro.
 func (n *ConsensusNode) resetElectionTimer() {
 	select {
 	case n.electionResetCh <- struct{}{}:
@@ -44,7 +46,8 @@ func (n *ConsensusNode) resetElectionTimer() {
 // electionLoop gestisce il timer di elezione del nodo.
 //
 // Se il timer scade e il nodo non è leader, viene avviata una nuova elezione.
-// Il timer viene resettato quando il nodo riceve heartbeat validi o concede un voto.
+// Il timer viene resettato quando il nodo osserva attività valida da un leader
+// o partecipa a un'elezione concedendo il voto.
 func (n *ConsensusNode) electionLoop() {
 	timer := time.NewTimer(randomElectionTimeout())
 	defer timer.Stop()
@@ -78,10 +81,15 @@ func (n *ConsensusNode) electionLoop() {
 	}
 }
 
-// startElection avvia una nuova elezione Raft.
+// startElection avvia una nuova elezione.
 //
 // Il nodo passa a Candidate, incrementa il termine, vota per sé stesso e invia
-// RequestVote in parallelo a tutti i peer conosciuti.
+// RequestVote in parallelo ai peer. Se ottiene la maggioranza, diventa leader.
+//
+// Il voto per sé stesso segue il modello Raft: il candidate conta come primo
+// voto valido. Prima di inviare le richieste ai peer, il nuovo termine e il voto
+// vengono persistiti, così il nodo non può votare due volte nello stesso termine
+// dopo un crash.
 func (n *ConsensusNode) startElection() {
 	n.mu.Lock()
 	if n.role == consensuspb.NodeRole_NODE_ROLE_LEADER {
@@ -99,6 +107,9 @@ func (n *ConsensusNode) startElection() {
 	lastLogIndex := n.lastLogIndexLocked()
 	lastLogTerm := n.lastLogTermLocked()
 	votes := 1
+
+	// Il quorum è la maggioranza del cluster. Solo un candidate che raggiunge la
+	// maggioranza può diventare leader, evitando leader concorrenti nello stesso termine.
 	neededVotes := n.majority()
 
 	if err := n.persistLocked(); err != nil {
@@ -187,8 +198,9 @@ func (n *ConsensusNode) startElection() {
 
 // becomeLeaderLocked trasforma il nodo corrente in leader.
 //
-// Deve essere chiamata con n.mu già acquisito.
-// Inizializza nextIndex e matchIndex per ogni follower.
+// Deve essere chiamata con n.mu già acquisito. Inizializza nextIndex e matchIndex
+// per ogni follower: questi indici servono al leader per sapere da quale punto
+// riprendere la replica del log verso ciascun peer.
 func (n *ConsensusNode) becomeLeaderLocked() {
 	n.role = consensuspb.NodeRole_NODE_ROLE_LEADER
 	n.leaderID = n.id
@@ -204,12 +216,15 @@ func (n *ConsensusNode) becomeLeaderLocked() {
 	n.resetElectionTimer()
 }
 
-// RequestVote gestisce la RPC usata da un Candidate per richiedere un voto.
+// RequestVote gestisce la RPC con cui un Candidate richiede un voto.
 //
-// Un voto viene concesso solo se:
+// Il voto viene concesso solo se:
 //   - il termine del candidato non è più vecchio del termine locale;
 //   - il nodo non ha già votato per un altro candidato nello stesso termine;
 //   - il log del candidato è almeno aggiornato quanto quello locale.
+//
+// La verifica sul log è una regola di sicurezza: evita che un candidato con log
+// arretrato diventi leader e perda entry già committed.
 func (n *ConsensusNode) RequestVote(ctx context.Context, req *consensuspb.RequestVoteRequest) (*consensuspb.RequestVoteResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -233,6 +248,7 @@ func (n *ConsensusNode) RequestVote(ctx context.Context, req *consensuspb.Reques
 
 	voteGranted := false
 	canVoteForCandidate := n.votedFor == "" || n.votedFor == req.CandidateId
+	// Il candidato deve avere un log almeno aggiornato quanto quello locale.
 	logIsUpToDate := n.isCandidateLogUpToDateLocked(req.LastLogIndex, req.LastLogTerm)
 
 	if canVoteForCandidate && logIsUpToDate {
