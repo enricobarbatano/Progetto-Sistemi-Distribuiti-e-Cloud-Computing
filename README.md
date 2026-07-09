@@ -777,53 +777,351 @@ reports/figures/
 
 ## Deploy su Amazon EC2 Learner Lab
 
+Questa sezione descrive il flusso essenziale per accedere all'istanza EC2 dal terminale del Learner Lab, avviare il progetto tramite Makefile e testarlo da PC locale.
 
-Preparazione istanza Amazon Linux 2023:
+### 1. Accesso all'istanza EC2 dal Learner Lab
 
-```bash
-sudo dnf update -y
-sudo dnf install -y docker git
-sudo systemctl start docker
-sudo systemctl enable docker
-sudo usermod -aG docker ec2-user
-```
-
-Dopo `usermod`, disconnettersi e riconnettersi via SSH.
-
-Installazione Docker Compose:
+Dopo aver avviato il Learner Lab, aprire il terminale integrato. Il prompt sarà simile a:
 
 ```bash
-sudo mkdir -p /usr/local/lib/docker/cli-plugins
-sudo curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" -o /usr/local/lib/docker/cli-plugins/docker-compose
-sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+eee_...@runweb...:~$
 ```
 
-Installazione Buildx, se necessario:
+Questo terminale non è ancora l'istanza EC2. Da qui bisogna collegarsi all'istanza tramite SSH.
+
+Per trovare il percorso della chiave `.pem`:
 
 ```bash
-sudo curl -SL "https://github.com/docker/buildx/releases/download/v0.35.0/buildx-v0.35.0.linux-amd64" -o /usr/local/lib/docker/cli-plugins/docker-buildx
-sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+find ~ -name "*.pem"
 ```
 
-Avvio cluster su EC2:
+Esempio di output:
+
+```*ext
+/mnt/vocwork4/work/.../.ssh/la*suser.pem
+```
+
+Impostare i permess* della chiave:
 
 ```bash
-git clone https://github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing.git
-cd Progetto-Sistemi-Distribuiti-e-Cloud-Computing
-docker compose -f deployments/docker/docker-compose.yml up -d --build
-curl http://localhost:8081/health
+chmod 400 *PEM_PATH>
 ```
 
-Porte Security Group:
+Collegarsi all'ista*za EC2 usando il Public IPv4 dell'*stanza:
 
-```text
-22    SSH
-8080  Client Proxy gRPC
-8081  Proxy health check
-9090  Backup Service gRPC
+```bash
+ssh -i <PEM_PATH>*ec2-user@<EC2_PUBLIC_IP>
+```
+
+Esem*io:
+
+```bash
+ssh -i /mnt/vocwork4/*ork/.../.ssh/labsuser.pem ec2-user*18.215.171.188
+```
+
+Alla prima con*essione, se richiesto, rispondere:*
+```bash
+yes
+```
+
+Se l'accesso ha *uccesso, il prompt diventa simile *:
+
+```bash
+[ec2-user@ip-172-31-xx-*x ~]$
+```
+
+Per uscire dall'istanza*EC2 e tornare al terminale Learner*Lab:
+
+```bash
+exit
 ```
 
 ---
+
+### 2* Prima configurazione dell'istanza*EC2
+
+Se l'istanza è nuova o l'ambi*nte è stato resettato, installare *ocker, Git e Make:
+
+```bash
+sudo d*f update -y
+sudo dnf install -y do*ker git make
+sudo systemctl start *ocker
+sudo systemctl enable docker*sudo usermod -aG docker ec2-user
+`*`
+
+Dopo `usermod`, uscire e rientr*re via SSH:
+
+```bash
+exit
+ssh -i <*EM_PATH> ec2-user@<EC2_PUBLIC_IP>
+*``
+
+Questo passaggio è necessario *er applicare il gruppo Docker all'*tente `ec2-user`.
+
+---
+
+### 3. Cas* istanza già configurata
+
+Se l'ist*nza era solo stoppata e poi riavvi*ta, non è necessario reinstallare *ocker, Git, Make, Docker Compose o*Buildx.
+
+Dopo l'accesso SSH:
+
+```b*sh
+cd Progetto-Sistemi-Distribuiti*e-Cloud-Computing
+git pull
+make he*p
+make ec2-doctor
+```
+
+Se `make ec*-doctor` mostra Docker, Docker Com*ose e Buildx, l'ambiente è pronto.*
+Nota: se l'istanza viene stoppata*e poi riavviata, il Public IPv4 pu* cambiare. In quel caso aggiornare*i comandi usando il nuovo IP pubbl*co mostrato nella console EC2.
+
+--*
+
+### 4. Clone del repository
+
+Se *l repository non è ancora presente*sull'istanza:
+
+```bash
+git clone h*tps://github.com/enricobarbatano/P*ogetto-Sistemi-Distribuiti-e-Cloud*Computing.git
+cd Progetto-Sistemi-*istribuiti-e-Cloud-Computing
+```
+
+*e il repository è già presente:
+
+`*`bash
+cd Progetto-Sistemi-Distribu*ti-e-Cloud-Computing
+git pull
+```
+*---
+
+### 5. Installazione Docker C*mpose e Buildx tramite Make
+
+Dentr* la cartella del progetto:
+
+```bas*
+make ec2-install-compose
+make ec2*install-buildx
+make ec2-doctor
+```*
+Se `make ec2-doctor` mostra `go: *ommand not found`, non è un proble*a per il deploy Docker. Go serve s*ll'istanza solo se si vogliono ese*uire direttamente comandi come `ma*e ci` o i client con `go run`. Le *mmagini Docker vengono compilate u*ando l'immagine Go definita nei Do*kerfile.
+
+---
+
+### 6. Avvio cluste* su EC2
+
+Cluster a 3 nodi:
+
+```bas*
+make ec2-up-3
+```
+
+Cluster a 5 no*i:
+
+```bash
+make ec2-up-5
+```
+
+Clu*ter a 7 nodi:
+
+```bash
+make ec2-up*7
+```
+
+Controllare i container:
+
+`*`bash
+make docker-ps-3
+```
+
+oppure*
+
+```bash
+make docker-ps-5
+make do*ker-ps-7
+```
+
+Verificare l'health *heck del Client Proxy direttamente*da EC2:
+
+```bash
+make ec2-health
+`*`
+
+Output atteso:
+
+```json
+{"statu*":"ok"}
+```
+
+---
+
+### 7. Porte Sec*rity Group
+
+Nel Security Group del*'istanza EC2 devono essere aperte *e seguenti porte:
+
+```text
+22    S*H
+8080  Client Proxy gRPC
+8081  Pr*xy health check
+9090  Backup Servi*e gRPC
+```
+
+I Consensus Node comun*cano principalmente nella rete Doc*er interna. Dall'esterno si usano *l Client Proxy e il Backup Service*
+
+---
+
+### 8. Test dal PC locale v*rso EC2
+
+Dopo aver avviato il clus*er su EC2, dal PC locale usare il *ublic IPv4 dell'istanza.
+
+Il Clien* Proxy è esposto sulla porta `8080*.
+
+Leader discovery:
+
+```bash
+make*bench-leader TARGET=<EC2_PUBLIC_IP*:8080
+```
+
+Put:
+
+```bash
+make benc*-put TARGET=<EC2_PUBLIC_IP>:8080 K*Y=test-key VALUE=test-value
+```
+
+G*t:
+
+```bash
+make bench-get TARGET=*EC2_PUBLIC_IP>:8080 KEY=test-key
+`*`
+
+Delete:
+
+```bash
+make bench-del*te TARGET=<EC2_PUBLIC_IP>:8080 KEY*test-key
+```
+
+Esempio:
+
+```bash
+make bench-leader TARGET=18.215.171.188:8080
+make bench-put TARGET=18.215.171.188:8080 KEY=test-key VALUE=test-value
+make bench-get TARGET=18.215.171.188:8080 KEY=test-key
+make bench-delete TARGET=18.215.171.188:8080 KEY=test-key
+```
+
+Il Backup Service è esposto sulla porta `9090`.
+
+Backup status:
+
+```bash
+make backup-status BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
+```
+
+Trigger backup:
+
+```bash
+make backup-run BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
+```
+
+Esempio:
+
+```bash
+make backup-status BACKUP_TARGET=18.215.171.188:9090
+make backup-run BACKUP_TARGET=18.215.171.188:9090
+```
+
+Health check del Proxy da PC locale:
+
+```bash
+curl.exe http://<EC2_PUBLIC_IP>:8081/health
+```
+
+Esempio:
+
+```bash
+curl.exe http://18.215.171.188:8081/health
+```
+
+Output atteso:
+
+```json
+{"status":"ok"}
+```
+
+---
+
+### 9. Stop e pulizia su EC2
+
+Fermare il cluster senza cancellare i volumi:
+
+```bash
+make ec2-down-3
+make ec2-down-5
+make ec2-down-7
+```
+
+Cancellare anche i volumi persistenti, quindi WAL, snapshot e state file:
+
+```bash
+make ec2-clean-3
+make ec2-clean-5
+make ec2-clean-7
+```
+
+Usare i target `ec2-clean-*` solo quando si vuole ripartire da stato completamente pulito.
+
+---
+
+### 10. Sequenza rapida consigliata
+
+Prima configurazione di una nuova istanza:
+
+```bash
+find ~ -name "*.pem"
+chmod 400 <PEM_PATH>
+ssh -i <PEM_PATH> ec2-user@<EC2_PUBLIC_IP>
+sudo dnf update -y
+sudo dnf install -y docker git make
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker ec2-user
+exit
+```
+
+Rientro e avvio progetto:
+
+```bash
+ssh -i <PEM_PATH> ec2-user@<EC2_PUBLIC_IP>
+git clone https://github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing.git
+cd Progetto-Sistemi-Distribuiti-e-Cloud-Computing
+make ec2-install-compose
+make ec2-install-buildx
+make ec2-doctor
+make ec2-up-3
+make ec2-health
+```
+
+Se l'istanza era già configurata:
+
+```bash
+ssh -i <PEM_PATH> ec2-user@<EC2_PUBLIC_IP>
+cd Progetto-Sistemi-Distribuiti-e-Cloud-Computing
+git pull
+make ec2-doctor
+make ec2-up-3
+make ec2-health
+```
+
+Dal PC locale:
+
+```bash
+make bench-leader TARGET=<EC2_PUBLIC_IP>:8080
+make bench-put TARGET=<EC2_PUBLIC_IP>:8080 KEY=test-key VALUE=test-value
+make bench-get TARGET=<EC2_PUBLIC_IP>:8080 KEY=test-key
+make backup-status BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
+make backup-run BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
+```
+
 
 ## GitHub Actions
 
