@@ -797,40 +797,41 @@ find ~ -name "*.pem"
 
 Esempio di output:
 
-```*ext
-/mnt/vocwork4/work/.../.ssh/la*suser.pem
+```text
+/mnt/vocwork4/work/.../.ssh/labsuser.pem
 ```
 
-Impostare i permess* della chiave:
+Impostare i permessi della chiave:
 
 ```bash
-chmod 400 *PEM_PATH>
+chmod 400 <PEM_PATH>
 ```
 
-Collegarsi all'ista*za EC2 usando il Public IPv4 dell'*stanza:
+Collegarsi all'istanza EC2 usando il Public IPv4 dell'istanza:
 
 ```bash
-ssh -i <PEM_PATH>*ec2-user@<EC2_PUBLIC_IP>
+ssh -i <PEM_PATH> ec2-user@<EC2_PUBLIC_IP>
 ```
 
-Esem*io:
+Esempio:
 
 ```bash
-ssh -i /mnt/vocwork4/*ork/.../.ssh/labsuser.pem ec2-user*18.215.171.188
+ssh -i /mnt/vocwork4/work/.../.ssh/labsuser.pem ec2-user@18.215.171.188
 ```
 
-Alla prima con*essione, se richiesto, rispondere:*
+Alla prima connessione, se richiesto, rispondere:
+
 ```bash
 yes
 ```
 
-Se l'accesso ha *uccesso, il prompt diventa simile *:
+Se l'accesso ha successo, il prompt diventa simile a:
 
 ```bash
-[ec2-user@ip-172-31-xx-*x ~]$
+[ec2-user@ip-172-31-xx-xx ~]$
 ```
 
-Per uscire dall'istanza*EC2 e tornare al terminale Learner*Lab:
+Per uscire dall'istanza EC2 e tornare al terminale Learner Lab:
 
 ```bash
 exit
@@ -838,166 +839,164 @@ exit
 
 ---
 
-### 2* Prima configurazione dell'istanza*EC2
+### 2. Prima configurazione dell'istanza EC2
 
-Se l'istanza è nuova o l'ambi*nte è stato resettato, installare *ocker, Git e Make:
+Se l'istanza è nuova o l'ambiente è stato resettato, installare Docker, Git e Make:
 
 ```bash
-sudo d*f update -y
-sudo dnf install -y do*ker git make
-sudo systemctl start *ocker
-sudo systemctl enable docker*sudo usermod -aG docker ec2-user
-`*`
+sudo dnf update -y
+sudo dnf install -y docker git make
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker ec2-user
+```
 
-Dopo `usermod`, uscire e rientr*re via SSH:
+Dopo `usermod`, uscire e rientrare via SSH:
 
 ```bash
 exit
-ssh -i <*EM_PATH> ec2-user@<EC2_PUBLIC_IP>
-*``
+ssh -i <PEM_PATH> ec2-user@<EC2_PUBLIC_IP>
+```
 
-Questo passaggio è necessario *er applicare il gruppo Docker all'*tente `ec2-user`.
+Questo passaggio è necessario per applicare il gruppo Docker all'utente `ec2-user`.
 
 ---
 
-### 3. Cas* istanza già configurata
+### 3. Caso istanza già configurata
 
-Se l'ist*nza era solo stoppata e poi riavvi*ta, non è necessario reinstallare *ocker, Git, Make, Docker Compose o*Buildx.
+Se l'istanza era solo stoppata e poi riavviata, non è necessario reinstallare Docker, Git, Make, Docker Compose o Buildx.
 
 Dopo l'accesso SSH:
 
-```b*sh
-cd Progetto-Sistemi-Distribuiti*e-Cloud-Computing
-git pull
-make he*p
-make ec2-doctor
-```
-
-Se `make ec*-doctor` mostra Docker, Docker Com*ose e Buildx, l'ambiente è pronto.*
-Nota: se l'istanza viene stoppata*e poi riavviata, il Public IPv4 pu* cambiare. In quel caso aggiornare*i comandi usando il nuovo IP pubbl*co mostrato nella console EC2.
-
---*
-
-### 4. Clone del repository
-
-Se *l repository non è ancora presente*sull'istanza:
-
 ```bash
-git clone h*tps://github.com/enricobarbatano/P*ogetto-Sistemi-Distribuiti-e-Cloud*Computing.git
-cd Progetto-Sistemi-*istribuiti-e-Cloud-Computing
-```
-
-*e il repository è già presente:
-
-`*`bash
-cd Progetto-Sistemi-Distribu*ti-e-Cloud-Computing
+cd Progetto-Sistemi-Distribuiti-e-Cloud-Computing
 git pull
-```
-*---
-
-### 5. Installazione Docker C*mpose e Buildx tramite Make
-
-Dentr* la cartella del progetto:
-
-```bas*
-make ec2-install-compose
-make ec2*install-buildx
+make help
 make ec2-doctor
-```*
-Se `make ec2-doctor` mostra `go: *ommand not found`, non è un proble*a per il deploy Docker. Go serve s*ll'istanza solo se si vogliono ese*uire direttamente comandi come `ma*e ci` o i client con `go run`. Le *mmagini Docker vengono compilate u*ando l'immagine Go definita nei Do*kerfile.
+```
+
+Se `make ec2-doctor` mostra Docker, Docker Compose e Buildx, l'ambiente è pronto.
+Nota: se l'istanza viene stoppata e poi riavviata, il Public IPv4 può cambiare. In quel caso aggiornare i comandi usando il nuovo IP pubblico mostrato nella console EC2.
 
 ---
 
-### 6. Avvio cluste* su EC2
+### 4. Clone del repository
+
+Se il repository non è ancora presente sull'istanza:
+
+```bash
+git clone https://github.com/enricobarbatano/Progetto-Sistemi-Distribuiti-e-Cloud-Computing.git
+cd Progetto-Sistemi-Distribuiti-e-Cloud-Computing
+```
+
+Se il repository è già presente:
+
+```bash
+cd Progetto-Sistemi-Distribuiti-e-Cloud-Computing
+git pull
+```
+
+---
+
+### 5. Installazione Docker Compose e Buildx tramite Make
+
+Dentro la cartella del progetto:
+
+```bash
+make ec2-install-compose
+make ec2-install-buildx
+make ec2-doctor
+```
+
+Se `make ec2-doctor` mostra `go: command not found`, non è un problema per il deploy Docker. Go serve sull'istanza solo se si vogliono eseguire direttamente comandi come `make ci` o i client con `go run`. Le immagini Docker vengono compilate usando l'immagine Go definita nei Dockerfile.
+
+---
+
+### 6. Avvio cluster su EC2
 
 Cluster a 3 nodi:
 
-```bas*
+```bash
 make ec2-up-3
 ```
 
-Cluster a 5 no*i:
+Cluster a 5 nodi:
 
 ```bash
 make ec2-up-5
 ```
 
-Clu*ter a 7 nodi:
+Cluster a 7 nodi:
 
 ```bash
-make ec2-up*7
+make ec2-up-7
 ```
 
 Controllare i container:
 
-`*`bash
-make docker-ps-3
-```
-
-oppure*
-
 ```bash
+make docker-ps-3
 make docker-ps-5
-make do*ker-ps-7
+make docker-ps-7
 ```
 
-Verificare l'health *heck del Client Proxy direttamente*da EC2:
+Verificare l'health check del Client Proxy direttamente da EC2:
 
 ```bash
 make ec2-health
-`*`
+```
 
 Output atteso:
 
 ```json
-{"statu*":"ok"}
+{"status":"ok"}
 ```
 
 ---
 
-### 7. Porte Sec*rity Group
+### 7. Porte Security Group
 
-Nel Security Group del*'istanza EC2 devono essere aperte *e seguenti porte:
+Nel Security Group dell'istanza EC2 devono essere aperte le seguenti porte:
 
 ```text
-22    S*H
+22    SSH
 8080  Client Proxy gRPC
-8081  Pr*xy health check
-9090  Backup Servi*e gRPC
+8081  Proxy health check
+9090  Backup Service gRPC
 ```
 
-I Consensus Node comun*cano principalmente nella rete Doc*er interna. Dall'esterno si usano *l Client Proxy e il Backup Service*
+I Consensus Node comunicano principalmente nella rete Docker interna. Dall'esterno si usano il Client Proxy e il Backup Service.
 
 ---
 
-### 8. Test dal PC locale v*rso EC2
+### 8. Test dal PC locale verso EC2
 
-Dopo aver avviato il clus*er su EC2, dal PC locale usare il *ublic IPv4 dell'istanza.
+Dopo aver avviato il cluster su EC2, dal PC locale usare il public IPv4 dell'istanza.
 
-Il Clien* Proxy è esposto sulla porta `8080*.
+Il Client Proxy è esposto sulla porta `8080`.
 
 Leader discovery:
 
 ```bash
-make*bench-leader TARGET=<EC2_PUBLIC_IP*:8080
+make bench-leader TARGET=<EC2_PUBLIC_IP>:8080
 ```
 
 Put:
 
 ```bash
-make benc*-put TARGET=<EC2_PUBLIC_IP>:8080 K*Y=test-key VALUE=test-value
+make bench-put TARGET=<EC2_PUBLIC_IP>:8080 KEY=test-key VALUE=test-value
 ```
 
-G*t:
+Get:
 
 ```bash
-make bench-get TARGET=*EC2_PUBLIC_IP>:8080 KEY=test-key
-`*`
+make bench-get TARGET=<EC2_PUBLIC_IP>:8080 KEY=test-key
+```
 
 Delete:
 
 ```bash
-make bench-del*te TARGET=<EC2_PUBLIC_IP>:8080 KEY*test-key
+make bench-delete TARGET=<EC2_PUBLIC_IP>:8080 KEY=test-key
 ```
 
 Esempio:
@@ -1026,8 +1025,8 @@ make backup-run BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
 Esempio:
 
 ```bash
-make backup-status BACKUP_TARGET=18.215.171.188:9090
-make backup-run BACKUP_TARGET=18.215.171.188:9090
+make backup-status BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
+make backup-run BACKUP_TARGET=<EC2_PUBLIC_IP>:9090
 ```
 
 Health check del Proxy da PC locale:
@@ -1058,6 +1057,18 @@ Fermare il cluster senza cancellare i volumi:
 make ec2-down-3
 make ec2-down-5
 make ec2-down-7
+```
+
+Cancellare anche i volumi persistenti, quindi WAL, snapshot e state file:
+
+```bash
+make ec2-clean-3
+make ec2-clean-5
+make ec2-clean-7
+```
+
+Usare i target `ec2-clean-*` solo quando si vuole ripartire da stato completamente pulito.
+
 ```
 
 Cancellare anche i volumi persistenti, quindi WAL, snapshot e state file:
@@ -1207,17 +1218,6 @@ Sintesi prestazioni:
 | 5 | Put | 123.16 | 152.66 | 8.15 |
 | 7 | Put | 110.88 | 119.13 | 9.05 |
 
----
-
-## Limitazioni note
-
-```text
-La compattazione è logica: gli snapshot consolidano lo stato, ma il WAL fisico resta append-only.
-Non sono implementate ottimizzazioni Raft avanzate come ReadIndex o lease-based reads.
-Le misure di failover sono basate su polling con risoluzione di circa 100 ms.
-I test coprono principalmente guasti fail-stop tramite arresto container.
-Le RPC non usano TLS/autenticazione nella configurazione didattica.
-```
 
 ---
 
@@ -1245,34 +1245,6 @@ Rimozione immagini non usate:
 
 ```bash
 docker system prune -f
-```
-
----
-
-## Stato del progetto
-
-Funzionalità completate:
-
-```text
-Consensus Node
-elezione leader
-replica log
-commit su quorum
-Client Proxy
-Client-side Service Discovery
-Circuit Breaker
-WAL e recovery
-snapshot locale
-compattazione logica
-Backup Service
-Docker Compose
-GitHub Actions
-Deploy EC2 Learner Lab
-benchmark scalabilità 3/5/7 nodi
-test failover leader
-test Backup Service
-test backup parziale con nodo offline
-persistenza volumi
 ```
 
 ---
