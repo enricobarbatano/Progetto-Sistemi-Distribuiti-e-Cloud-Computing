@@ -777,11 +777,6 @@ reports/figures/
 
 ## Deploy su Amazon EC2 Learner Lab
 
-Documentazione dettagliata:
-
-```text
-documents/Fase10-deployEC2LearnerLab.md
-```
 
 Preparazione istanza Amazon Linux 2023:
 
