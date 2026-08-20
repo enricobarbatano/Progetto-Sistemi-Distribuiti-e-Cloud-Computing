@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Stage 1: compilazione del binario Go in un ambiente dedicato al build.
-FROM golang:1.26.4-alpine AS builder
+FROM golang:1.26.6-alpine AS builder
 
 WORKDIR /app
 
